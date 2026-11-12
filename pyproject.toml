@@ -29,7 +29,6 @@ classifiers = [
     "Framework :: Jupyter",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -56,6 +55,11 @@ data = [
     "matplotlib>=3.8.0",
     "seaborn>=0.13.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/maicondallg/saturnolab"
+Repository = "https://github.com/maicondallg/saturnolab"
+Issues = "https://github.com/maicondallg/saturnolab/issues"
 
 [project.scripts]
 saturnolab = "saturnolab.cli:main"
