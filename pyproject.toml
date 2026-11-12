@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "saturnolab"
+version = "0.1.0"
+description = "Lightweight JupyterLab-compatible Python notebook environment with native inline AI connected to live kernel memory."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Maicon" }
+]
+keywords = [
+    "jupyter",
+    "jupyterlab",
+    "notebook",
+    "ipynb",
+    "python",
+    "ai",
+    "llm",
+    "data-science",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Framework :: Jupyter",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "websockets>=12.0",
+    "jupyter-client>=8.6.0",
+    "ipykernel>=6.29.0",
+    "nbformat>=5.10.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.7.0",
+]
+
+[project.optional-dependencies]
+data = [
+    "pandas>=2.0.0",
+    "numpy>=1.26.0",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+]
+
+[project.scripts]
+saturnolab = "saturnolab.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["saturnolab"]
+artifacts = ["saturnolab/static/**"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/saturnolab",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+artifacts = ["saturnolab/static/**"]

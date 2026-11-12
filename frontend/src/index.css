@@ -1,0 +1,340 @@
+@import "tailwindcss";
+
+/* 1. GRAPHITE (Default — Sober Neutral Dark IDE, zero neon blue) */
+:root,
+[data-theme="graphite"],
+[data-theme="dark"] {
+  --sat-bg-canvas: #141416;
+  --sat-bg-surface: #1b1b1e;
+  --sat-bg-subtle: #222226;
+  --sat-bg-hover: #2b2b30;
+  --sat-text-primary: #e4e4e7;
+  --sat-text-secondary: #a1a1aa;
+  --sat-text-muted: #71717a;
+  --sat-border: #2e2e34;
+  --sat-border-strong: #52525b;
+  --sat-border-subtle: #232328;
+  --sat-cell-bg: #18181b;
+  --sat-cell-active-bg: #1c1c20;
+  --sat-accent: #d97736;
+  --sat-accent-soft: rgba(217, 119, 54, 0.14);
+  --sat-cmd-bar: #a1a1aa;
+  --sat-edit-bar: #d97736;
+  --sat-orange: #d97736;
+  --sat-green: #4d9375;
+  --sat-btn-primary-bg: #e4e4e7;
+  --sat-btn-primary-text: #141416;
+  --sat-ai-bg: #1e1e23;
+  --sat-ai-border: #3a3a42;
+  --sat-error-bg: #241618;
+  --sat-error-border: #5c282e;
+  --sat-error-text: #f3a6ad;
+}
+
+/* 2. OBSIDIAN (High-contrast Pure Black Monochrome) */
+[data-theme="obsidian"] {
+  --sat-bg-canvas: #0a0a0b;
+  --sat-bg-surface: #111113;
+  --sat-bg-subtle: #18181b;
+  --sat-bg-hover: #222226;
+  --sat-text-primary: #ededef;
+  --sat-text-secondary: #a1a1aa;
+  --sat-text-muted: #686870;
+  --sat-border: #242428;
+  --sat-border-strong: #4d4d56;
+  --sat-border-subtle: #19191d;
+  --sat-cell-bg: #101012;
+  --sat-cell-active-bg: #141417;
+  --sat-accent: #d4d4d8;
+  --sat-accent-soft: rgba(212, 212, 216, 0.12);
+  --sat-cmd-bar: #71717a;
+  --sat-edit-bar: #e4e4e7;
+  --sat-orange: #c97a40;
+  --sat-green: #4d9375;
+  --sat-btn-primary-bg: #ededef;
+  --sat-btn-primary-text: #0a0a0b;
+  --sat-ai-bg: #151518;
+  --sat-ai-border: #323238;
+  --sat-error-bg: #221315;
+  --sat-error-border: #522126;
+  --sat-error-text: #f09ca2;
+}
+
+/* 3. GRUVBOX DARK (Classic Warm Engineering Dark) */
+[data-theme="gruvbox"] {
+  --sat-bg-canvas: #1d2021;
+  --sat-bg-surface: #282828;
+  --sat-bg-subtle: #32302f;
+  --sat-bg-hover: #3c3836;
+  --sat-text-primary: #ebdbb2;
+  --sat-text-secondary: #d5c4a1;
+  --sat-text-muted: #928374;
+  --sat-border: #3c3836;
+  --sat-border-strong: #665c54;
+  --sat-border-subtle: #2e2c2b;
+  --sat-cell-bg: #242424;
+  --sat-cell-active-bg: #282828;
+  --sat-accent: #fe8019;
+  --sat-accent-soft: rgba(254, 128, 25, 0.14);
+  --sat-cmd-bar: #a89984;
+  --sat-edit-bar: #fe8019;
+  --sat-orange: #d65d0e;
+  --sat-green: #8ec07c;
+  --sat-btn-primary-bg: #ebdbb2;
+  --sat-btn-primary-text: #1d2021;
+  --sat-ai-bg: #2c2a29;
+  --sat-ai-border: #504945;
+  --sat-error-bg: #321d1b;
+  --sat-error-border: #7c352d;
+  --sat-error-text: #fb4934;
+}
+
+/* 4. NORD SLATE (Muted Cool Gray-Slate, understated) */
+[data-theme="nord"] {
+  --sat-bg-canvas: #1c2026;
+  --sat-bg-surface: #232831;
+  --sat-bg-subtle: #2b313c;
+  --sat-bg-hover: #353c4a;
+  --sat-text-primary: #e5e9f0;
+  --sat-text-secondary: #c0c8d8;
+  --sat-text-muted: #7b88a1;
+  --sat-border: #343b48;
+  --sat-border-strong: #546076;
+  --sat-border-subtle: #282e39;
+  --sat-cell-bg: #21262e;
+  --sat-cell-active-bg: #252b35;
+  --sat-accent: #81a1c1;
+  --sat-accent-soft: rgba(129, 161, 193, 0.14);
+  --sat-cmd-bar: #81a1c1;
+  --sat-edit-bar: #a3be8c;
+  --sat-orange: #d08770;
+  --sat-green: #a3be8c;
+  --sat-btn-primary-bg: #d8dee9;
+  --sat-btn-primary-text: #1c2026;
+  --sat-ai-bg: #272d38;
+  --sat-ai-border: #434c5e;
+  --sat-error-bg: #2f2024;
+  --sat-error-border: #6b3b44;
+  --sat-error-text: #e0919a;
+}
+
+/* 5. JUPYTER LIGHT / CLEAN PAPER */
+[data-theme="paper"],
+[data-theme="light"] {
+  --sat-bg-canvas: #f4f4f5;
+  --sat-bg-surface: #ffffff;
+  --sat-bg-subtle: #ececee;
+  --sat-bg-hover: #e2e2e6;
+  --sat-text-primary: #18181b;
+  --sat-text-secondary: #3f3f46;
+  --sat-text-muted: #71717a;
+  --sat-border: #d4d4d8;
+  --sat-border-strong: #71717a;
+  --sat-border-subtle: #e4e4e7;
+  --sat-cell-bg: #fbfbfc;
+  --sat-cell-active-bg: #ffffff;
+  --sat-accent: #c2591b;
+  --sat-accent-soft: rgba(194, 89, 27, 0.1);
+  --sat-cmd-bar: #52525b;
+  --sat-edit-bar: #c2591b;
+  --sat-orange: #c2591b;
+  --sat-green: #2f7d58;
+  --sat-btn-primary-bg: #18181b;
+  --sat-btn-primary-text: #ffffff;
+  --sat-ai-bg: #f6f6f7;
+  --sat-ai-border: #b8b8c0;
+  --sat-error-bg: #fef2f2;
+  --sat-error-border: #f5c2c2;
+  --sat-error-text: #991b1b;
+}
+
+/* 6. WARM STONE (Low-glare Technical Light) */
+[data-theme="solarized_light"] {
+  --sat-bg-canvas: #efece4;
+  --sat-bg-surface: #f8f6f1;
+  --sat-bg-subtle: #e6e2d8;
+  --sat-bg-hover: #dcd7cb;
+  --sat-text-primary: #262320;
+  --sat-text-secondary: #4a453e;
+  --sat-text-muted: #787166;
+  --sat-border: #d1cbc0;
+  --sat-border-strong: #877f72;
+  --sat-border-subtle: #e1ddd3;
+  --sat-cell-bg: #f5f3ed;
+  --sat-cell-active-bg: #faf9f5;
+  --sat-accent: #9a5b13;
+  --sat-accent-soft: rgba(154, 91, 19, 0.11);
+  --sat-cmd-bar: #6b6459;
+  --sat-edit-bar: #9a5b13;
+  --sat-orange: #b45309;
+  --sat-green: #3b7a57;
+  --sat-btn-primary-bg: #262320;
+  --sat-btn-primary-text: #f8f6f1;
+  --sat-ai-bg: #efeae0;
+  --sat-ai-border: #bfb8aa;
+  --sat-error-bg: #f9ebeb;
+  --sat-error-border: #dfb8b8;
+  --sat-error-text: #8c2323;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+}
+
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--sat-bg-canvas);
+  color: var(--sat-text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  font-size: 14.5px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* CodeMirror 6 crisp IDE look */
+.saturno-cm-wrapper .cm-editor {
+  background: transparent !important;
+  font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.saturno-cm-wrapper .cm-editor.cm-focused {
+  outline: none !important;
+}
+
+.saturno-cm-wrapper .cm-scroller {
+  font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  padding: 7px 2px;
+}
+
+.saturno-cm-wrapper .cm-content {
+  padding: 2px 6px;
+}
+
+.saturno-cm-wrapper .cm-gutters {
+  background: transparent !important;
+  border-right: 1px solid var(--sat-border-subtle) !important;
+  color: var(--sat-text-muted);
+  font-size: 12px;
+  padding-left: 6px;
+  padding-right: 6px;
+  opacity: 0.7;
+}
+
+.saturno-cm-wrapper .cm-activeLine {
+  background-color: rgba(128, 128, 128, 0.05) !important;
+}
+
+.saturno-cm-wrapper .cm-activeLineGutter {
+  background-color: transparent !important;
+  color: var(--sat-text-secondary) !important;
+}
+
+.saturno-cm-wrapper .cm-selectionBackground,
+.saturno-cm-wrapper .cm-editor.cm-focused .cm-selectionBackground {
+  background-color: rgba(160, 160, 175, 0.22) !important;
+}
+
+.saturno-cm-wrapper .cm-placeholder {
+  color: var(--sat-text-muted) !important;
+  opacity: 0.65;
+}
+
+/* Pandas / HTML output tables — clean technical style */
+.jp-rendered-html {
+  overflow-x: auto;
+  font-size: 13.5px;
+  color: var(--sat-text-primary);
+}
+
+.jp-rendered-html table.dataframe,
+.jp-rendered-html table {
+  border-collapse: collapse;
+  border: 1px solid var(--sat-border);
+  font-size: 13px;
+  margin: 4px 0;
+}
+
+.jp-rendered-html table th,
+.jp-rendered-html table td {
+  padding: 5px 12px;
+  text-align: right;
+  border-bottom: 1px solid var(--sat-border-subtle);
+}
+
+.jp-rendered-html table thead th {
+  border-bottom: 1px solid var(--sat-border);
+  font-weight: 600;
+  background: var(--sat-bg-subtle);
+  color: var(--sat-text-primary);
+}
+
+.jp-rendered-html table tbody tr:nth-child(even) {
+  background: rgba(128, 128, 128, 0.04);
+}
+
+.jp-rendered-html table tbody tr:hover {
+  background: var(--sat-accent-soft);
+}
+
+/* Markdown rendered cells */
+.jp-markdown-rendered {
+  line-height: 1.6;
+  font-size: 14.5px;
+  color: var(--sat-text-primary);
+}
+.jp-markdown-rendered h1 {
+  font-size: 1.6rem;
+  font-weight: 600;
+  margin: 0.2rem 0 0.65rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--sat-border);
+}
+.jp-markdown-rendered h2 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin: 0.55rem 0 0.4rem;
+}
+.jp-markdown-rendered h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0.45rem 0 0.3rem;
+}
+.jp-markdown-rendered p {
+  margin: 0.4rem 0;
+}
+.jp-markdown-rendered ul,
+.jp-markdown-rendered ol {
+  padding-left: 1.4rem;
+  margin: 0.4rem 0;
+}
+.jp-markdown-rendered li {
+  margin: 0.15rem 0;
+}
+.jp-markdown-rendered code {
+  font-family: "JetBrains Mono", Menlo, Consolas, monospace;
+  background: var(--sat-bg-subtle);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.jp-markdown-rendered pre {
+  background: var(--sat-bg-subtle);
+  padding: 10px 14px;
+  border-radius: 4px;
+  border: 1px solid var(--sat-border);
+  overflow-x: auto;
+}
+.jp-markdown-rendered pre code {
+  background: transparent;
+  padding: 0;
+}
