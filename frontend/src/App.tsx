@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { FileCode, FileText, Plus, Rocket, X } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Columns2, Plus, Rocket, X } from 'lucide-react';
 import { useSaturnoStore } from './store/useSaturnoStore';
 import { MenuBar } from './components/MenuBar';
 import { LeftSidebar } from './components/LeftSidebar';
@@ -7,131 +7,407 @@ import { NotebookView } from './components/NotebookView';
 import { LauncherView } from './components/LauncherView';
 import { TextFileEditor } from './components/TextFileEditor';
 import { FolderPickerModal } from './components/FolderPickerModal';
-import { AISettingsModal } from './components/AISettingsModal';
-import { ShortcutsModal } from './components/ShortcutsModal';
+import { SettingsModal } from './components/SettingsModal';
+import { FileTypeIcon } from './components/FileTypeIcon';
+import { FileEntry } from './types/notebook';
 
 export const App: React.FC = () => {
   const {
     initialize,
     tabs,
-    activeTabId,
+    panes,
+    activePaneId,
+    sidebarPosition,
+    setActivePane,
     setActiveTab,
     closeTab,
+    splitTab,
+    moveTabToPane,
+    closePane,
+    setPaneWidths,
     createNewNotebook,
+    openEntry,
   } = useSaturnoStore();
+
+  const [dragDropZone, setDragDropZone] = useState<{
+    paneId: string;
+    zone: 'center' | 'left' | 'right';
+  } | null>(null);
+
+  const workspaceContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     initialize();
   }, [initialize]);
 
-  const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
+  const startPaneResize = (e: React.MouseEvent, leftPaneIdx: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const leftPane = panes[leftPaneIdx];
+    const rightPane = panes[leftPaneIdx + 1];
+    if (!leftPane || !rightPane || !workspaceContainerRef.current) return;
+
+    const containerWidth = workspaceContainerRef.current.getBoundingClientRect().width;
+    const totalRatio = panes.reduce((acc, p) => acc + p.widthRatio, 0);
+    const startX = e.clientX;
+    const startLeftRatio = leftPane.widthRatio;
+    const startRightRatio = rightPane.widthRatio;
+
+    const onMouseMove = (moveEvt: MouseEvent) => {
+      const deltaPx = moveEvt.clientX - startX;
+      const deltaRatio = (deltaPx / Math.max(1, containerWidth)) * totalRatio;
+      const minRatio = totalRatio * 0.15;
+      const maxLeft = startLeftRatio + startRightRatio - minRatio;
+      const nextLeft = Math.max(minRatio, Math.min(maxLeft, startLeftRatio + deltaRatio));
+      const nextRight = startLeftRatio + startRightRatio - nextLeft;
+      setPaneWidths({
+        [leftPane.id]: nextLeft,
+        [rightPane.id]: nextRight,
+      });
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  const resetEqualWidths = () => {
+    const map: Record<string, number> = {};
+    panes.forEach((p) => {
+      map[p.id] = 1;
+    });
+    setPaneWidths(map);
+  };
+
+  const handleDropOnPane = async (
+    e: React.DragEvent,
+    targetPaneId: string,
+    zone: 'center' | 'left' | 'right'
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragDropZone(null);
+
+    const tabDataRaw = e.dataTransfer.getData('application/x-saturno-tab');
+    if (tabDataRaw) {
+      try {
+        const { tabId, sourcePaneId } = JSON.parse(tabDataRaw);
+        if (zone === 'left' || zone === 'right') {
+          splitTab(tabId, targetPaneId, zone);
+        } else {
+          moveTabToPane(tabId, sourcePaneId, targetPaneId);
+        }
+        return;
+      } catch {
+        // ignore
+      }
+    }
+
+    const entryRaw = e.dataTransfer.getData('application/x-saturno-entry');
+    if (entryRaw) {
+      try {
+        const entry: FileEntry = JSON.parse(entryRaw);
+        if (entry.type !== 'directory') {
+          if (zone === 'left' || zone === 'right') {
+            await openEntry(entry, { sideBySide: true, targetPaneId });
+          } else {
+            await openEntry(entry, { sideBySide: false, targetPaneId });
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  };
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden">
       <MenuBar />
 
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        <LeftSidebar />
+        {sidebarPosition === 'left' && <LeftSidebar />}
 
-        <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Flush Technical Tab Bar (JupyterLab / VS Code style) */}
-          <div
-            className="h-9 flex items-stretch overflow-x-auto border-b select-none shrink-0"
-            style={{
-              backgroundColor: 'var(--sat-bg-subtle)',
-              borderColor: 'var(--sat-border)',
-            }}
-          >
-            {tabs.map((tab) => {
-              const isSelected = tab.id === activeTab?.id;
-              const isDirty = tab.kind !== 'launcher' && tab.dirty;
+        <main
+          ref={workspaceContainerRef}
+          className="flex-1 flex min-w-0 min-h-0 overflow-hidden"
+        >
+          {panes.map((pane, paneIdx) => {
+            const isPaneFocused = pane.id === activePaneId;
+            const paneTabs = pane.tabIds
+              .map((tid) => tabs.find((t) => t.id === tid))
+              .filter((t): t is NonNullable<typeof t> => Boolean(t));
+            const activeTab =
+              paneTabs.find((t) => t.id === pane.activeTabId) || paneTabs[0];
+            const dropInfo =
+              dragDropZone?.paneId === pane.id ? dragDropZone.zone : null;
 
-              return (
-                <div
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className="px-3.5 flex items-center gap-2 border-r text-xs cursor-pointer shrink-0 max-w-[230px] transition-colors"
-                  style={{
-                    backgroundColor: isSelected
-                      ? 'var(--sat-bg-surface)'
-                      : 'var(--sat-bg-subtle)',
-                    color: isSelected
-                      ? 'var(--sat-text-primary)'
-                      : 'var(--sat-text-muted)',
-                    borderColor: 'var(--sat-border)',
-                    borderTop: isSelected
-                      ? '2px solid var(--sat-accent)'
-                      : '2px solid transparent',
+            return (
+              <React.Fragment key={pane.id}>
+                <section
+                  onMouseDownCapture={() => {
+                    if (!isPaneFocused) {
+                      setActivePane(pane.id);
+                    }
                   }}
+                  onDragOver={(e) => {
+                    const hasTab = e.dataTransfer.types.includes(
+                      'application/x-saturno-tab'
+                    );
+                    const hasEntry = e.dataTransfer.types.includes(
+                      'application/x-saturno-entry'
+                    );
+                    if (!hasTab && !hasEntry) return;
+                    e.preventDefault();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const relX = (e.clientX - rect.left) / Math.max(1, rect.width);
+                    const zone: 'left' | 'right' | 'center' =
+                      relX < 0.22 ? 'left' : relX > 0.78 ? 'right' : 'center';
+                    if (
+                      dragDropZone?.paneId !== pane.id ||
+                      dragDropZone?.zone !== zone
+                    ) {
+                      setDragDropZone({ paneId: pane.id, zone });
+                    }
+                  }}
+                  onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                      setDragDropZone(null);
+                    }
+                  }}
+                  onDrop={(e) =>
+                    handleDropOnPane(e, pane.id, dropInfo || 'center')
+                  }
+                  style={{ flex: `${pane.widthRatio} 1 0%` }}
+                  className="relative flex flex-col min-w-0 min-h-0 overflow-hidden"
                 >
-                  {tab.kind === 'notebook' ? (
-                    <FileCode
-                      size={14}
-                      className="shrink-0"
-                      style={{ color: 'var(--sat-orange)' }}
-                    />
-                  ) : tab.kind === 'launcher' ? (
-                    <Rocket
-                      size={14}
-                      className="shrink-0"
-                      style={{ color: 'var(--sat-text-secondary)' }}
-                    />
-                  ) : (
-                    <FileText size={14} className="shrink-0 opacity-75" />
-                  )}
-
-                  <span className={`truncate ${isSelected ? 'font-medium' : ''}`}>
-                    {tab.name}
-                  </span>
-
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (
-                        isDirty &&
-                        !window.confirm(`Fechar "${tab.name}" sem salvar alterações?`)
-                      ) {
-                        return;
-                      }
-                      closeTab(tab.id);
+                  {/* Pane Tab Bar */}
+                  <div
+                    className="h-9 flex items-stretch justify-between border-b select-none shrink-0"
+                    style={{
+                      backgroundColor: 'var(--sat-bg-subtle)',
+                      borderColor: 'var(--sat-border)',
                     }}
-                    title="Fechar aba"
-                    className="p-0.5 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer ml-1"
                   >
-                    {isDirty ? (
-                      <span
-                        className="w-2 h-2 rounded-full inline-block"
-                        style={{ backgroundColor: 'var(--sat-accent)' }}
+                    <div className="flex items-stretch overflow-x-auto min-w-0 flex-1">
+                      {paneTabs.map((tab) => {
+                        const isSelected = tab.id === activeTab?.id;
+                        const isDirty = tab.kind !== 'launcher' && tab.dirty;
+
+                        return (
+                          <div
+                            key={`${pane.id}_${tab.id}`}
+                            draggable
+                            onDragStart={(e) => {
+                              e.dataTransfer.setData(
+                                'application/x-saturno-tab',
+                                JSON.stringify({
+                                  tabId: tab.id,
+                                  sourcePaneId: pane.id,
+                                })
+                              );
+                              e.dataTransfer.effectAllowed = 'move';
+                            }}
+                            onClick={() => setActiveTab(tab.id, pane.id)}
+                            className="group/tab px-3 flex items-center gap-2 border-r text-xs cursor-pointer shrink-0 max-w-[240px] transition-colors"
+                            style={{
+                              backgroundColor: isSelected
+                                ? 'var(--sat-bg-surface)'
+                                : 'var(--sat-bg-subtle)',
+                              color: isSelected
+                                ? 'var(--sat-text-primary)'
+                                : 'var(--sat-text-muted)',
+                              borderColor: 'var(--sat-border)',
+                              borderTop: isSelected
+                                ? isPaneFocused
+                                  ? '2px solid var(--sat-accent)'
+                                  : '2px solid var(--sat-border-strong)'
+                                : '2px solid transparent',
+                            }}
+                          >
+                            {tab.kind === 'launcher' ? (
+                              <Rocket
+                                size={14}
+                                className="shrink-0"
+                                style={{ color: 'var(--sat-text-secondary)' }}
+                              />
+                            ) : (
+                              <FileTypeIcon
+                                name={tab.name}
+                                type={tab.kind === 'notebook' ? 'notebook' : 'file'}
+                                size={14}
+                              />
+                            )}
+
+                            <span
+                              className={`truncate ${isSelected ? 'font-medium' : ''}`}
+                            >
+                              {tab.name}
+                            </span>
+
+                            <div className="flex items-center gap-0.5 ml-1">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  splitTab(tab.id, pane.id, 'right');
+                                }}
+                                title="Abrir aba lado a lado (Split View)"
+                                className="opacity-0 group-hover/tab:opacity-80 hover:!opacity-100 p-0.5 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer transition-opacity"
+                              >
+                                <Columns2 size={12} />
+                              </button>
+
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const openInOtherPane = panes.some(
+                                    (p) =>
+                                      p.id !== pane.id && p.tabIds.includes(tab.id)
+                                  );
+                                  if (
+                                    isDirty &&
+                                    !openInOtherPane &&
+                                    !window.confirm(
+                                      `Fechar "${tab.name}" sem salvar alterações?`
+                                    )
+                                  ) {
+                                    return;
+                                  }
+                                  closeTab(tab.id, pane.id);
+                                }}
+                                title="Fechar aba"
+                                className="p-0.5 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+                              >
+                                {isDirty ? (
+                                  <span
+                                    className="w-2 h-2 rounded-full inline-block"
+                                    style={{ backgroundColor: 'var(--sat-accent)' }}
+                                  />
+                                ) : (
+                                  <X size={13} />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      <button
+                        onClick={() => {
+                          setActivePane(pane.id);
+                          createNewNotebook();
+                        }}
+                        title="Novo Notebook neste painel"
+                        className="px-2.5 flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer shrink-0"
+                        style={{ color: 'var(--sat-text-muted)' }}
+                      >
+                        <Plus size={15} />
+                      </button>
+                    </div>
+
+                    {/* Right-side Pane Split / Close Controls */}
+                    <div
+                      className="flex items-center px-1.5 gap-0.5 border-l shrink-0"
+                      style={{ borderColor: 'var(--sat-border)' }}
+                    >
+                      {activeTab && (
+                        <button
+                          onClick={() => splitTab(activeTab.id, pane.id, 'right')}
+                          title="Dividir aba ativa lado a lado ( tal como no JupyterLab )"
+                          className="h-6 px-1.5 rounded-[2px] flex items-center gap-1 text-[11px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+                          style={{ color: 'var(--sat-text-secondary)' }}
+                        >
+                          <Columns2 size={13} />
+                          <span className="hidden xl:inline">Dividir</span>
+                        </button>
+                      )}
+
+                      {panes.length > 1 && (
+                        <button
+                          onClick={() => closePane(pane.id)}
+                          title="Fechar este painel dividido (mantendo abas abertas)"
+                          className="h-6 w-6 rounded-[2px] flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+                          style={{ color: 'var(--sat-text-muted)' }}
+                        >
+                          <X size={13} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Active Tab Content */}
+                  <div className="flex-1 min-h-0 overflow-hidden relative">
+                    {activeTab?.kind === 'notebook' && (
+                      <NotebookView
+                        tab={activeTab}
+                        isActivePane={isPaneFocused}
                       />
-                    ) : (
-                      <X size={13} />
                     )}
-                  </button>
-                </div>
-              );
-            })}
+                    {activeTab?.kind === 'launcher' && <LauncherView />}
+                    {activeTab?.kind === 'file' && (
+                      <TextFileEditor tab={activeTab} />
+                    )}
 
-            <button
-              onClick={() => createNewNotebook()}
-              title="Novo Notebook"
-              className="px-2.5 flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer shrink-0"
-              style={{ color: 'var(--sat-text-muted)' }}
-            >
-              <Plus size={15} />
-            </button>
-          </div>
+                    {/* Visual Drop Zone Overlay when dragging a tab or file */}
+                    {dropInfo && (
+                      <div
+                        className={`pointer-events-none absolute top-0 bottom-0 z-30 border-2 border-dashed flex items-center justify-center transition-all ${
+                          dropInfo === 'left'
+                            ? 'left-0 w-1/2'
+                            : dropInfo === 'right'
+                              ? 'right-0 w-1/2'
+                              : 'inset-0'
+                        }`}
+                        style={{
+                          backgroundColor: 'var(--sat-accent-soft)',
+                          borderColor: 'var(--sat-accent)',
+                        }}
+                      >
+                        <span
+                          className="px-3 py-1.5 rounded-[4px] border text-xs font-medium shadow-lg"
+                          style={{
+                            backgroundColor: 'var(--sat-bg-surface)',
+                            borderColor: 'var(--sat-border)',
+                            color: 'var(--sat-text-primary)',
+                          }}
+                        >
+                          {dropInfo === 'left'
+                            ? 'Abrir Lado Esquerdo'
+                            : dropInfo === 'right'
+                              ? 'Abrir Lado Direito'
+                              : 'Abrir neste Painel'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </section>
 
-          <div className="flex-1 min-h-0 overflow-hidden">
-            {activeTab?.kind === 'notebook' && <NotebookView tab={activeTab} />}
-            {activeTab?.kind === 'launcher' && <LauncherView />}
-            {activeTab?.kind === 'file' && <TextFileEditor tab={activeTab} />}
-          </div>
+                {/* Resizable Vertical Divider between Side-by-Side Panes */}
+                {paneIdx < panes.length - 1 && (
+                  <div
+                    onMouseDown={(e) => startPaneResize(e, paneIdx)}
+                    onDoubleClick={resetEqualWidths}
+                    title="Arraste para redimensionar painéis (duplo clique para 50/50)"
+                    className="w-1.5 shrink-0 cursor-col-resize hover:bg-amber-500/40 active:bg-amber-500/60 transition-colors border-x"
+                    style={{
+                      backgroundColor: 'var(--sat-bg-subtle)',
+                      borderColor: 'var(--sat-border)',
+                    }}
+                  />
+                )}
+              </React.Fragment>
+            );
+          })}
         </main>
+
+        {sidebarPosition === 'right' && <LeftSidebar />}
       </div>
 
       <FolderPickerModal />
-      <AISettingsModal />
-      <ShortcutsModal />
+      <SettingsModal />
     </div>
   );
 };

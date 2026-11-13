@@ -7,7 +7,7 @@
   --sat-bg-canvas: #141416;
   --sat-bg-surface: #1b1b1e;
   --sat-bg-subtle: #222226;
-  --sat-bg-hover: #2b2b30;
+  --sat-bg-hover: #2b2b31;
   --sat-text-primary: #e4e4e7;
   --sat-text-secondary: #a1a1aa;
   --sat-text-muted: #71717a;
@@ -29,6 +29,28 @@
   --sat-error-bg: #241618;
   --sat-error-border: #5c282e;
   --sat-error-text: #f3a6ad;
+
+  /* File Type Colors */
+  --sat-type-py: #58a6ff;
+  --sat-type-folder: #e5a93c;
+  --sat-type-data: #3fb950;
+  --sat-type-json: #f59e0b;
+  --sat-type-md: #c084fc;
+  --sat-type-sh: #4ade80;
+  --sat-type-cfg: #f472b6;
+  --sat-type-sql: #22d3ee;
+  --sat-type-web: #38bdf8;
+
+  /* Python & Code Syntax Highlighting */
+  --sat-syn-keyword: #ff7b72;
+  --sat-syn-string: #a5d6ff;
+  --sat-syn-number: #79c0ff;
+  --sat-syn-comment: #6e7681;
+  --sat-syn-function: #d2a8ff;
+  --sat-syn-class: #ffa657;
+  --sat-syn-operator: #ff7b72;
+  --sat-syn-builtin: #79c0ff;
+  --sat-syn-meta: #e3b341;
 }
 
 /* 2. OBSIDIAN (High-contrast Pure Black Monochrome) */
@@ -36,7 +58,7 @@
   --sat-bg-canvas: #0a0a0b;
   --sat-bg-surface: #111113;
   --sat-bg-subtle: #18181b;
-  --sat-bg-hover: #222226;
+  --sat-bg-hover: #232329;
   --sat-text-primary: #ededef;
   --sat-text-secondary: #a1a1aa;
   --sat-text-muted: #686870;
@@ -58,6 +80,26 @@
   --sat-error-bg: #221315;
   --sat-error-border: #522126;
   --sat-error-text: #f09ca2;
+
+  --sat-type-py: #60a5fa;
+  --sat-type-folder: #eab308;
+  --sat-type-data: #34d399;
+  --sat-type-json: #fbbf24;
+  --sat-type-md: #c084fc;
+  --sat-type-sh: #4ade80;
+  --sat-type-cfg: #f472b6;
+  --sat-type-sql: #22d3ee;
+  --sat-type-web: #38bdf8;
+
+  --sat-syn-keyword: #f47067;
+  --sat-syn-string: #96d0ff;
+  --sat-syn-number: #6cb6ff;
+  --sat-syn-comment: #636e7b;
+  --sat-syn-function: #dcbdfb;
+  --sat-syn-class: #f69d50;
+  --sat-syn-operator: #f47067;
+  --sat-syn-builtin: #6cb6ff;
+  --sat-syn-meta: #e3b341;
 }
 
 /* 3. GRUVBOX DARK (Classic Warm Engineering Dark) */
@@ -87,6 +129,26 @@
   --sat-error-bg: #321d1b;
   --sat-error-border: #7c352d;
   --sat-error-text: #fb4934;
+
+  --sat-type-py: #83a598;
+  --sat-type-folder: #fabd2f;
+  --sat-type-data: #b8bb26;
+  --sat-type-json: #fe8019;
+  --sat-type-md: #d3869b;
+  --sat-type-sh: #8ec07c;
+  --sat-type-cfg: #d3869b;
+  --sat-type-sql: #83a598;
+  --sat-type-web: #fabd2f;
+
+  --sat-syn-keyword: #fb4934;
+  --sat-syn-string: #b8bb26;
+  --sat-syn-number: #d3869b;
+  --sat-syn-comment: #928374;
+  --sat-syn-function: #fabd2f;
+  --sat-syn-class: #fe8019;
+  --sat-syn-operator: #fe8019;
+  --sat-syn-builtin: #83a598;
+  --sat-syn-meta: #8ec07c;
 }
 
 /* 4. NORD SLATE (Muted Cool Gray-Slate, understated) */
@@ -116,6 +178,26 @@
   --sat-error-bg: #2f2024;
   --sat-error-border: #6b3b44;
   --sat-error-text: #e0919a;
+
+  --sat-type-py: #88c0d0;
+  --sat-type-folder: #ebcb8b;
+  --sat-type-data: #a3be8c;
+  --sat-type-json: #d08770;
+  --sat-type-md: #b48ead;
+  --sat-type-sh: #a3be8c;
+  --sat-type-cfg: #b48ead;
+  --sat-type-sql: #81a1c1;
+  --sat-type-web: #88c0d0;
+
+  --sat-syn-keyword: #81a1c1;
+  --sat-syn-string: #a3be8c;
+  --sat-syn-number: #b48ead;
+  --sat-syn-comment: #616e88;
+  --sat-syn-function: #88c0d0;
+  --sat-syn-class: #8fbcbb;
+  --sat-syn-operator: #81a1c1;
+  --sat-syn-builtin: #ebcb8b;
+  --sat-syn-meta: #d08770;
 }
 
 /* 5. JUPYTER LIGHT / CLEAN PAPER */
@@ -146,6 +228,26 @@
   --sat-error-bg: #fef2f2;
   --sat-error-border: #f5c2c2;
   --sat-error-text: #991b1b;
+
+  --sat-type-py: #2563eb;
+  --sat-type-folder: #d97706;
+  --sat-type-data: #059669;
+  --sat-type-json: #d97706;
+  --sat-type-md: #7c3aed;
+  --sat-type-sh: #16a34a;
+  --sat-type-cfg: #db2777;
+  --sat-type-sql: #0891b2;
+  --sat-type-web: #0284c7;
+
+  --sat-syn-keyword: #cf222e;
+  --sat-syn-string: #0a3069;
+  --sat-syn-number: #0550ae;
+  --sat-syn-comment: #6e7781;
+  --sat-syn-function: #8250df;
+  --sat-syn-class: #953800;
+  --sat-syn-operator: #cf222e;
+  --sat-syn-builtin: #0550ae;
+  --sat-syn-meta: #9a6700;
 }
 
 /* 6. WARM STONE (Low-glare Technical Light) */
@@ -175,6 +277,26 @@
   --sat-error-bg: #f9ebeb;
   --sat-error-border: #dfb8b8;
   --sat-error-text: #8c2323;
+
+  --sat-type-py: #1d4ed8;
+  --sat-type-folder: #b45309;
+  --sat-type-data: #047857;
+  --sat-type-json: #b45309;
+  --sat-type-md: #6d28d9;
+  --sat-type-sh: #15803d;
+  --sat-type-cfg: #be185d;
+  --sat-type-sql: #0e7490;
+  --sat-type-web: #0369a1;
+
+  --sat-syn-keyword: #b91c1c;
+  --sat-syn-string: #1e40af;
+  --sat-syn-number: #0f766e;
+  --sat-syn-comment: #787166;
+  --sat-syn-function: #6d28d9;
+  --sat-syn-class: #b45309;
+  --sat-syn-operator: #b91c1c;
+  --sat-syn-builtin: #1d4ed8;
+  --sat-syn-meta: #92400e;
 }
 
 * {
@@ -199,11 +321,39 @@ body,
   -webkit-font-smoothing: antialiased;
 }
 
+/* File Explorer Row Hover & Selection Effects */
+.saturno-file-row {
+  position: relative;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 100ms ease;
+  border-left: 2px solid transparent;
+}
+
+.saturno-file-row:hover {
+  background-color: var(--sat-bg-hover) !important;
+  border-left-color: var(--sat-border-strong);
+}
+
+.saturno-file-row.is-active {
+  background-color: var(--sat-bg-subtle);
+  border-left-color: var(--sat-accent) !important;
+}
+
+.saturno-file-row.is-selected {
+  background-color: var(--sat-accent-soft);
+  border-left-color: var(--sat-accent) !important;
+}
+
+.saturno-file-row.is-drop-target {
+  background-color: var(--sat-accent-soft) !important;
+  outline: 1px dashed var(--sat-accent);
+  outline-offset: -1px;
+}
+
 /* CodeMirror 6 crisp IDE look */
 .saturno-cm-wrapper .cm-editor {
   background: transparent !important;
   font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", Menlo, Consolas, monospace;
-  font-size: 14px;
+  font-size: var(--sat-editor-font-size, 14px);
   line-height: 1.55;
 }
 

@@ -64,6 +64,20 @@ class SaveFileRequest(BaseModel):
     content: str
 
 
+class CreateFileRequest(BaseModel):
+    folder: str = ""
+    name: str = "script.py"
+
+
+class MoveEntriesRequest(BaseModel):
+    paths: list[str]
+    target_folder: str = ""
+
+
+class DeleteBatchRequest(BaseModel):
+    paths: list[str]
+
+
 class KernelActionRequest(BaseModel):
     notebook_path: str
 
@@ -129,9 +143,13 @@ async def switch_workspace(req: WorkspaceSwitchRequest) -> dict[str, Any]:
 
 
 @app.get("/api/fs/list")
-async def api_list_dir(path: str = Query(default="")) -> dict[str, Any]:
+async def api_list_dir(
+    path: str = Query(default=""), recursive: bool = Query(default=True)
+) -> dict[str, Any]:
     try:
-        return fs_service.list_directory(config_manager.get_workspace_path(), path)
+        return fs_service.list_directory(
+            config_manager.get_workspace_path(), path, recursive=recursive
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (PermissionError, ValueError) as exc:
@@ -226,6 +244,38 @@ async def api_save_file(req: SaveFileRequest) -> dict[str, Any]:
         return fs_service.write_text_file(
             config_manager.get_workspace_path(), req.path, req.content
         )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/fs/file/create")
+async def api_create_file(req: CreateFileRequest) -> dict[str, Any]:
+    try:
+        return fs_service.create_text_file(
+            config_manager.get_workspace_path(), req.folder, req.name
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/fs/move")
+async def api_move_entries(req: MoveEntriesRequest) -> dict[str, Any]:
+    try:
+        ws = config_manager.get_workspace_path()
+        for p in req.paths:
+            await kernel_registry.shutdown_notebook(ws, p)
+        return fs_service.move_entries(ws, req.paths, req.target_folder)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/fs/delete-batch")
+async def api_delete_batch(req: DeleteBatchRequest) -> dict[str, Any]:
+    try:
+        ws = config_manager.get_workspace_path()
+        for p in req.paths:
+            await kernel_registry.shutdown_notebook(ws, p)
+        return fs_service.delete_entries(ws, req.paths)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

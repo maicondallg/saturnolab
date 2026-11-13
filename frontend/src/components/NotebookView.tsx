@@ -2,6 +2,8 @@ import React, { useEffect, useRef } from 'react';
 import {
   Eraser,
   FastForward,
+  Maximize2,
+  Minimize2,
   Plus,
   RotateCw,
   Save,
@@ -14,23 +16,30 @@ import { NotebookCell } from './NotebookCell';
 
 interface Props {
   tab: OpenNotebookTab;
+  isActivePane?: boolean;
 }
 
-export const NotebookView: React.FC<Props> = ({ tab }) => {
+export const NotebookView: React.FC<Props> = ({ tab, isActivePane = true }) => {
   const {
     notebookMode,
-    saveActiveTab,
+    notebookLayout,
+    toggleNotebookLayout,
+    scrollSignal,
+    saveTabById,
     addCellAbove,
     addCellBelow,
     cutCell,
     copyCell,
     pasteCellBelow,
     deleteCell,
+    undoDeleteCell,
     moveCell,
     changeCellType,
     clearAllOutputs,
     selectCell,
     setMarkdownRendered,
+    toggleCellOutputCollapse,
+    toggleLineNumbers,
     runCell,
     runAllCells,
     interruptKernel,
@@ -38,13 +47,71 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
     openInlineAI,
   } = useSaturnoStore();
 
-  const lastDTimeRef = useRef<number>(0);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const lastChordRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
 
   const activeCell = tab.cells.find((c) => c.id === tab.activeCellId) || tab.cells[0];
 
+  // Auto-scroll to cell or cell result when executed / navigated
   useEffect(() => {
+    if (!scrollSignal || scrollSignal.notebookPath !== tab.path) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const timer = window.requestAnimationFrame(() => {
+      const cellEl = container.querySelector(
+        `[data-cell-id="${scrollSignal.cellId}"]`
+      ) as HTMLElement | null;
+      const outputEl = container.querySelector(
+        `[data-cell-output-id="${scrollSignal.cellId}"]`
+      ) as HTMLElement | null;
+      const bottomEl = container.querySelector(
+        `[data-cell-bottom-id="${scrollSignal.cellId}"]`
+      ) as HTMLElement | null;
+
+      const targetEl =
+        scrollSignal.kind === 'output'
+          ? outputEl || bottomEl || cellEl
+          : cellEl;
+
+      if (!targetEl) return;
+
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = targetEl.getBoundingClientRect();
+
+      const topMargin = 24;
+      const bottomMargin = 64;
+
+      if (scrollSignal.kind === 'output') {
+        // Ensure the bottom of the output/result is visible without cutting off the cell if it fits
+        if (targetRect.bottom > containerRect.bottom - bottomMargin) {
+          const delta = targetRect.bottom - (containerRect.bottom - bottomMargin);
+          container.scrollBy({ top: delta, behavior: 'smooth' });
+        } else if (targetRect.top < containerRect.top + topMargin) {
+          const delta = targetRect.top - (containerRect.top + topMargin);
+          container.scrollBy({ top: delta, behavior: 'smooth' });
+        }
+      } else {
+        if (targetRect.top < containerRect.top + topMargin) {
+          const delta = targetRect.top - (containerRect.top + topMargin);
+          container.scrollBy({ top: delta, behavior: 'smooth' });
+        } else if (targetRect.bottom > containerRect.bottom - bottomMargin) {
+          const delta = targetRect.bottom - (containerRect.bottom - bottomMargin);
+          container.scrollBy({ top: delta, behavior: 'smooth' });
+        }
+      }
+    });
+
+    return () => window.cancelAnimationFrame(timer);
+  }, [scrollSignal, tab.path]);
+
+  useEffect(() => {
+    if (!isActivePane) return;
+
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
+      if (target && target.closest('[data-modal-root="true"]')) return;
+
       const inInput =
         target &&
         (target.tagName === 'INPUT' ||
@@ -54,7 +121,7 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        saveActiveTab();
+        saveTabById(tab.id);
         return;
       }
 
@@ -74,6 +141,46 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
       if (inInput || notebookMode !== 'command' || !activeCell) return;
 
       const idx = tab.cells.findIndex((c) => c.id === activeCell.id);
+      const lowerKey = e.key.toLowerCase();
+      const now = Date.now();
+
+      // Jupyter Two-Key Chords in Command Mode: 0,0 (Restart Kernel), I,I (Interrupt), D,D (Delete Cell)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === '0') {
+          if (lastChordRef.current.key === '0' && now - lastChordRef.current.time < 600) {
+            e.preventDefault();
+            lastChordRef.current = { key: '', time: 0 };
+            restartKernel(true);
+            return;
+          }
+          lastChordRef.current = { key: '0', time: now };
+          return;
+        }
+
+        if (lowerKey === 'i') {
+          if (lastChordRef.current.key === 'i' && now - lastChordRef.current.time < 600) {
+            e.preventDefault();
+            lastChordRef.current = { key: '', time: 0 };
+            interruptKernel();
+            return;
+          }
+          lastChordRef.current = { key: 'i', time: now };
+          return;
+        }
+
+        if (lowerKey === 'd') {
+          if (lastChordRef.current.key === 'd' && now - lastChordRef.current.time < 600) {
+            e.preventDefault();
+            lastChordRef.current = { key: '', time: 0 };
+            deleteCell(activeCell.id);
+            return;
+          }
+          lastChordRef.current = { key: 'd', time: now };
+          return;
+        }
+      }
+
+      lastChordRef.current = { key: '', time: 0 };
 
       if (e.key === 'Enter' && e.shiftKey) {
         e.preventDefault();
@@ -96,39 +203,48 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
       } else if (e.altKey && e.key === 'ArrowDown') {
         e.preventDefault();
         moveCell(activeCell.id, 'down');
-      } else if (e.key === 'ArrowUp' || e.key.toLowerCase() === 'k') {
+      } else if (e.key === 'ArrowUp' || lowerKey === 'k') {
         e.preventDefault();
-        if (idx > 0) selectCell(tab.cells[idx - 1].id, 'command');
-      } else if (e.key === 'ArrowDown' || e.key.toLowerCase() === 'j') {
+        if (idx > 0) selectCell(tab.cells[idx - 1].id, 'command', true);
+      } else if (e.key === 'ArrowDown' || lowerKey === 'j') {
         e.preventDefault();
-        if (idx < tab.cells.length - 1) selectCell(tab.cells[idx + 1].id, 'command');
-      } else if (e.key.toLowerCase() === 'a' && !e.ctrlKey && !e.metaKey) {
+        if (idx < tab.cells.length - 1) selectCell(tab.cells[idx + 1].id, 'command', true);
+      } else if (lowerKey === 'a' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         addCellAbove(activeCell.id, 'code');
-      } else if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey) {
+      } else if (lowerKey === 'b' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         addCellBelow(activeCell.id, 'code');
       } else if (
-        (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey) ||
-        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'm')
+        (lowerKey === 'm' && !e.ctrlKey && !e.metaKey) ||
+        ((e.ctrlKey || e.metaKey) && lowerKey === 'm')
       ) {
         e.preventDefault();
         changeCellType(
           activeCell.id,
           activeCell.cell_type === 'code' ? 'markdown' : 'code'
         );
-      } else if (e.key.toLowerCase() === 'y' && !e.ctrlKey && !e.metaKey) {
+      } else if (lowerKey === 'y' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         changeCellType(activeCell.id, 'code');
-      } else if (e.key.toLowerCase() === 'x' && !e.ctrlKey && !e.metaKey) {
+      } else if (lowerKey === 'x' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         cutCell(activeCell.id);
-      } else if (e.key.toLowerCase() === 'c' && !e.ctrlKey && !e.metaKey) {
+      } else if (lowerKey === 'c' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         copyCell(activeCell.id);
-      } else if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey) {
+      } else if (lowerKey === 'v' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         pasteCellBelow(activeCell.id);
+      } else if (lowerKey === 'z' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        undoDeleteCell();
+      } else if (lowerKey === 'l' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        toggleLineNumbers();
+      } else if (lowerKey === 'o' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        toggleCellOutputCollapse(activeCell.id);
       } else if (
         (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
@@ -136,25 +252,18 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
       ) {
         e.preventDefault();
         deleteCell(activeCell.id);
-      } else if (e.key.toLowerCase() === 'd' && !e.ctrlKey && !e.metaKey) {
-        const now = Date.now();
-        if (now - lastDTimeRef.current < 500) {
-          e.preventDefault();
-          deleteCell(activeCell.id);
-          lastDTimeRef.current = 0;
-        } else {
-          lastDTimeRef.current = now;
-        }
       }
     };
 
     window.addEventListener('keydown', onKeyDown, { capture: true });
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
   }, [
+    isActivePane,
     notebookMode,
     activeCell,
+    tab.id,
     tab.cells,
-    saveActiveTab,
+    saveTabById,
     selectCell,
     openInlineAI,
     runCell,
@@ -167,6 +276,11 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
     copyCell,
     pasteCellBelow,
     deleteCell,
+    undoDeleteCell,
+    toggleLineNumbers,
+    toggleCellOutputCollapse,
+    restartKernel,
+    interruptKernel,
   ]);
 
   const statusColor =
@@ -189,15 +303,15 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
     <div className="flex flex-col h-full overflow-hidden">
       {/* Sober Technical Notebook Toolbar */}
       <div
-        className="h-9 px-3 flex items-center justify-between border-b shrink-0 select-none"
+        className="h-9 px-3 flex items-center justify-between border-b shrink-0 select-none gap-2 overflow-x-auto"
         style={{
           backgroundColor: 'var(--sat-bg-surface)',
           borderColor: 'var(--sat-border)',
         }}
       >
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <button
-            onClick={() => saveActiveTab()}
+            onClick={() => saveTabById(tab.id)}
             title="Salvar Notebook (Ctrl+S)"
             className="h-7 px-2 rounded-[3px] text-xs flex items-center gap-1.5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
             style={{ color: 'var(--sat-text-secondary)' }}
@@ -250,7 +364,7 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
           {tab.kernelStatus === 'busy' && (
             <button
               onClick={() => interruptKernel()}
-              title="Interromper execução"
+              title="Interromper execução (I, I)"
               className="h-7 px-2 rounded-[3px] text-xs font-medium flex items-center gap-1 text-red-400 hover:bg-red-500/10 cursor-pointer"
             >
               <Square size={12} className="fill-current" />
@@ -259,8 +373,8 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
           )}
 
           <button
-            onClick={() => restartKernel()}
-            title="Reiniciar Kernel"
+            onClick={() => restartKernel(false)}
+            title="Reiniciar Kernel (atalho: 0, 0 no modo comando)"
             className="h-7 px-2 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
             style={{ color: 'var(--sat-text-secondary)' }}
           >
@@ -299,7 +413,7 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
             <Sparkles size={12} style={{ color: 'var(--sat-accent)' }} />
             <span>IA Inline</span>
             <kbd
-              className="text-[10.5px] font-mono opacity-70 ml-0.5"
+              className="text-[10.5px] font-mono opacity-70 ml-0.5 hidden sm:inline"
               style={{ color: 'var(--sat-text-muted)' }}
             >
               Ctrl+I
@@ -307,12 +421,39 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
           </button>
         </div>
 
-        {/* Right: Clean Technical Kernel Status */}
+        {/* Right: Layout Mode Toggle (Centered / Expanded) + Clean Technical Kernel Status */}
         <div
-          className="flex items-center gap-2 text-xs font-mono"
+          className="flex items-center gap-2 text-xs font-mono shrink-0"
           style={{ color: 'var(--sat-text-secondary)' }}
         >
-          <span className="hidden sm:inline opacity-80">Python 3 (ipykernel)</span>
+          <button
+            onClick={toggleNotebookLayout}
+            title={
+              notebookLayout === 'centered'
+                ? 'Modo atual: Centralizado (clique para Expandir largura total)'
+                : 'Modo atual: Expandido (clique para Centralizar)'
+            }
+            className="h-7 px-2 rounded-[3px] border text-[11px] font-sans font-medium flex items-center gap-1.5 hover:opacity-90 cursor-pointer"
+            style={{
+              backgroundColor: 'var(--sat-bg-subtle)',
+              borderColor: 'var(--sat-border)',
+              color: 'var(--sat-text-secondary)',
+            }}
+          >
+            {notebookLayout === 'centered' ? (
+              <>
+                <Maximize2 size={12} />
+                <span className="hidden lg:inline">Centralizado</span>
+              </>
+            ) : (
+              <>
+                <Minimize2 size={12} style={{ color: 'var(--sat-accent)' }} />
+                <span className="hidden lg:inline">Expandido</span>
+              </>
+            )}
+          </button>
+
+          <span className="hidden xl:inline opacity-80">Python 3 (ipykernel)</span>
           <span className="hidden sm:inline opacity-35">|</span>
           <span
             className="w-2 h-2 rounded-full inline-block"
@@ -324,10 +465,15 @@ export const NotebookView: React.FC<Props> = ({ tab }) => {
 
       {/* Scrollable Cells Canvas */}
       <div
-        className="flex-1 overflow-y-auto px-4 md:px-8 py-5"
+        ref={scrollContainerRef}
+        className="flex-1 overflow-y-auto px-4 md:px-6 py-5"
         style={{ backgroundColor: 'var(--sat-bg-canvas)' }}
       >
-        <div className="max-w-5xl mx-auto pb-28 space-y-1.5">
+        <div
+          className={`${
+            notebookLayout === 'expanded' ? 'w-full max-w-none' : 'max-w-5xl mx-auto'
+          } pb-28 space-y-1.5 transition-all`}
+        >
           {tab.cells.map((cell) => (
             <NotebookCell
               key={cell.id}

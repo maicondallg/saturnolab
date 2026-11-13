@@ -1,12 +1,13 @@
 import React from 'react';
-import { FileCode, FolderOpen, Sparkles } from 'lucide-react';
+import { FileCode, FolderOpen, Settings } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 
 export const LauncherView: React.FC = () => {
   const {
     createNewNotebook,
+    createNewFile,
     setShowFolderModal,
-    setShowAIModal,
+    openSettings,
     workspaceRoot,
     config,
   } = useSaturnoStore();
@@ -27,7 +28,7 @@ export const LauncherView: React.FC = () => {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           <button
             onClick={() => createNewNotebook()}
             className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:opacity-90 transition-opacity cursor-pointer text-left"
@@ -38,9 +39,26 @@ export const LauncherView: React.FC = () => {
           >
             <FileCode size={22} style={{ color: 'var(--sat-orange)' }} />
             <div>
-              <div className="font-semibold text-sm">Python 3 (ipykernel)</div>
+              <div className="font-semibold text-sm">Notebook Python 3</div>
               <div className="text-xs mt-0.5" style={{ color: 'var(--sat-text-muted)' }}>
                 Criar notebook .ipynb
+              </div>
+            </div>
+          </button>
+
+          <button
+            onClick={() => createNewFile(undefined, 'script.py')}
+            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:opacity-90 transition-opacity cursor-pointer text-left"
+            style={{
+              backgroundColor: 'var(--sat-bg-surface)',
+              borderColor: 'var(--sat-border)',
+            }}
+          >
+            <FileCode size={22} style={{ color: 'var(--sat-type-py)' }} />
+            <div>
+              <div className="font-semibold text-sm">Script Python (.py)</div>
+              <div className="text-xs mt-0.5" style={{ color: 'var(--sat-text-muted)' }}>
+                Criar arquivo Python
               </div>
             </div>
           </button>
@@ -53,7 +71,7 @@ export const LauncherView: React.FC = () => {
               borderColor: 'var(--sat-border)',
             }}
           >
-            <FolderOpen size={22} style={{ color: 'var(--sat-text-secondary)' }} />
+            <FolderOpen size={22} style={{ color: 'var(--sat-type-folder)' }} />
             <div>
               <div className="font-semibold text-sm">Conectar Diretório</div>
               <div className="text-xs mt-0.5" style={{ color: 'var(--sat-text-muted)' }}>
@@ -63,18 +81,18 @@ export const LauncherView: React.FC = () => {
           </button>
 
           <button
-            onClick={() => setShowAIModal(true)}
+            onClick={() => openSettings('appearance')}
             className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:opacity-90 transition-opacity cursor-pointer text-left"
             style={{
               backgroundColor: 'var(--sat-bg-surface)',
               borderColor: 'var(--sat-border)',
             }}
           >
-            <Sparkles size={22} style={{ color: 'var(--sat-accent)' }} />
+            <Settings size={22} style={{ color: 'var(--sat-accent)' }} />
             <div>
-              <div className="font-semibold text-sm">Provedor de IA</div>
+              <div className="font-semibold text-sm">Configurações</div>
               <div className="text-xs mt-0.5 font-mono" style={{ color: 'var(--sat-text-muted)' }}>
-                {config?.active_provider || 'gemini'}
+                Temas, IA ({config?.active_provider || 'gemini'}) & Layout
               </div>
             </div>
           </button>

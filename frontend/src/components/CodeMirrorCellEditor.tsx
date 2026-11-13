@@ -9,11 +9,99 @@ import {
   placeholder as cmPlaceholder,
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-import { syntaxHighlighting, defaultHighlightStyle, bracketMatching } from '@codemirror/language';
+import {
+  syntaxHighlighting,
+  HighlightStyle,
+  bracketMatching,
+} from '@codemirror/language';
+import { tags } from '@lezer/highlight';
 import { python } from '@codemirror/lang-python';
 import { markdown } from '@codemirror/lang-markdown';
-import { oneDark } from '@codemirror/theme-one-dark';
 import { closeBrackets, autocompletion } from '@codemirror/autocomplete';
+
+const saturnoHighlightStyle = HighlightStyle.define([
+  {
+    tag: [
+      tags.keyword,
+      tags.controlKeyword,
+      tags.operatorKeyword,
+      tags.definitionKeyword,
+      tags.moduleKeyword,
+    ],
+    color: 'var(--sat-syn-keyword)',
+    fontWeight: '600',
+  },
+  {
+    tag: [tags.string, tags.special(tags.string), tags.regexp],
+    color: 'var(--sat-syn-string)',
+  },
+  {
+    tag: [tags.number, tags.integer, tags.float, tags.bool, tags.null, tags.atom],
+    color: 'var(--sat-syn-number)',
+  },
+  {
+    tag: [tags.comment, tags.lineComment, tags.blockComment, tags.docComment],
+    color: 'var(--sat-syn-comment)',
+    fontStyle: 'italic',
+  },
+  {
+    tag: [
+      tags.function(tags.variableName),
+      tags.function(tags.propertyName),
+      tags.definition(tags.variableName),
+    ],
+    color: 'var(--sat-syn-function)',
+  },
+  {
+    tag: [tags.className, tags.typeName, tags.definition(tags.typeName), tags.namespace],
+    color: 'var(--sat-syn-class)',
+    fontWeight: '600',
+  },
+  {
+    tag: [tags.operator, tags.compareOperator, tags.arithmeticOperator, tags.logicOperator],
+    color: 'var(--sat-syn-operator)',
+  },
+  {
+    tag: [tags.standard(tags.variableName), tags.self],
+    color: 'var(--sat-syn-builtin)',
+  },
+  {
+    tag: [tags.meta, tags.annotation, tags.processingInstruction],
+    color: 'var(--sat-syn-meta)',
+  },
+  {
+    tag: tags.heading,
+    color: 'var(--sat-accent)',
+    fontWeight: '700',
+  },
+  {
+    tag: tags.emphasis,
+    fontStyle: 'italic',
+  },
+  {
+    tag: tags.strong,
+    fontWeight: '700',
+  },
+]);
+
+const saturnoEditorTheme = EditorView.theme({
+  '&': {
+    color: 'var(--sat-text-primary)',
+    backgroundColor: 'transparent',
+  },
+  '.cm-content': {
+    caretColor: 'var(--sat-accent)',
+  },
+  '.cm-cursor, .cm-dropCursor': {
+    borderLeftColor: 'var(--sat-accent)',
+    borderLeftWidth: '2px',
+  },
+  '.cm-matchingBracket': {
+    backgroundColor: 'var(--sat-accent-soft)',
+    color: 'var(--sat-text-primary) !important',
+    outline: '1px solid var(--sat-border-strong)',
+  },
+});
 
 interface Props {
   value: string;
@@ -21,19 +109,20 @@ interface Props {
   theme: 'light' | 'dark';
   showLineNumbers: boolean;
   autoFocus?: boolean;
+  fullHeight?: boolean;
   placeholder?: string;
   onChange: (val: string) => void;
   onFocus?: () => void;
-  onShiftEnter: () => void;
-  onCtrlEnter: () => void;
-  onAltEnter: () => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  onToggleType: () => void;
-  onDeleteCell: () => void;
-  onEscape: () => void;
+  onShiftEnter?: () => void;
+  onCtrlEnter?: () => void;
+  onAltEnter?: () => void;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
+  onToggleType?: () => void;
+  onDeleteCell?: () => void;
+  onEscape?: () => void;
   onSave: () => void;
-  onTriggerAI: (selection: { from: number; to: number; text: string } | null) => void;
+  onTriggerAI?: (selection: { from: number; to: number; text: string } | null) => void;
 }
 
 export const CodeMirrorCellEditor: React.FC<Props> = ({
@@ -42,6 +131,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   theme,
   showLineNumbers,
   autoFocus,
+  fullHeight = false,
   placeholder,
   onChange,
   onFocus,
@@ -96,6 +186,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     if (!containerRef.current) return;
 
     const triggerAIHandler = (view: EditorView) => {
+      if (!cbRef.current.onTriggerAI) return false;
       const sel = view.state.selection.main;
       if (!sel.empty) {
         cbRef.current.onTriggerAI({
@@ -113,6 +204,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Shift-Enter',
         run: () => {
+          if (!cbRef.current.onShiftEnter) return false;
           cbRef.current.onShiftEnter();
           return true;
         },
@@ -120,6 +212,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Mod-Enter',
         run: () => {
+          if (!cbRef.current.onCtrlEnter) return false;
           cbRef.current.onCtrlEnter();
           return true;
         },
@@ -127,6 +220,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Alt-Enter',
         run: () => {
+          if (!cbRef.current.onAltEnter) return false;
           cbRef.current.onAltEnter();
           return true;
         },
@@ -134,6 +228,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Mod-Shift-Enter',
         run: () => {
+          if (!cbRef.current.onAltEnter) return false;
           cbRef.current.onAltEnter();
           return true;
         },
@@ -149,6 +244,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Alt-ArrowUp',
         run: () => {
+          if (!cbRef.current.onMoveUp) return false;
           cbRef.current.onMoveUp();
           return true;
         },
@@ -156,6 +252,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Alt-ArrowDown',
         run: () => {
+          if (!cbRef.current.onMoveDown) return false;
           cbRef.current.onMoveDown();
           return true;
         },
@@ -163,6 +260,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Mod-m',
         run: () => {
+          if (!cbRef.current.onToggleType) return false;
           cbRef.current.onToggleType();
           return true;
         },
@@ -170,6 +268,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Mod-Shift-Backspace',
         run: () => {
+          if (!cbRef.current.onDeleteCell) return false;
           cbRef.current.onDeleteCell();
           return true;
         },
@@ -184,6 +283,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       {
         key: 'Escape',
         run: (view) => {
+          if (!cbRef.current.onEscape) return false;
           view.contentDOM.blur();
           cbRef.current.onEscape();
           return true;
@@ -202,10 +302,11 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         closeBrackets(),
         autocompletion({ activateOnTyping: false }),
         highlightActiveLine(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        saturnoEditorTheme,
+        syntaxHighlighting(saturnoHighlightStyle, { fallback: true }),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         langCompartment.current.of(language === 'python' ? python() : markdown()),
-        themeCompartment.current.of(theme === 'dark' ? oneDark : []),
+        themeCompartment.current.of([]),
         lineNumCompartment.current.of(showLineNumbers ? lineNumbers() : []),
         placeholder ? cmPlaceholder(placeholder) : [],
         EditorView.lineWrapping,
@@ -262,7 +363,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: themeCompartment.current.reconfigure(theme === 'dark' ? oneDark : []),
+      effects: themeCompartment.current.reconfigure([]),
     });
   }, [theme]);
 
@@ -282,5 +383,10 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     }
   }, [autoFocus]);
 
-  return <div ref={containerRef} className="saturno-cm-wrapper w-full" />;
+  return (
+    <div
+      ref={containerRef}
+      className={`saturno-cm-wrapper w-full ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
+    />
+  );
 };

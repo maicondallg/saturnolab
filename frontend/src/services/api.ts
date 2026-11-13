@@ -43,9 +43,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
-  listDir: (path = '') =>
+  listDir: (path = '', recursive = true) =>
     apiFetch<{ workspace_root: string; current_path: string; items: FileEntry[] }>(
-      `/api/fs/list?path=${encodeURIComponent(path)}`
+      `/api/fs/list?path=${encodeURIComponent(path)}&recursive=${recursive ? 'true' : 'false'}`
     ),
   readNotebook: (path: string) =>
     apiFetch<{
@@ -94,6 +94,27 @@ export const api = {
     apiFetch<{ saved: boolean; path: string }>('/api/fs/file/save', {
       method: 'POST',
       body: JSON.stringify({ path, content }),
+    }),
+  createFile: (folder = '', name = 'script.py') =>
+    apiFetch<{ path: string; name: string; content: string; truncated: boolean }>(
+      '/api/fs/file/create',
+      {
+        method: 'POST',
+        body: JSON.stringify({ folder, name }),
+      }
+    ),
+  moveEntries: (paths: string[], target_folder = '') =>
+    apiFetch<{ moved: { old_path: string; new_path: string; name: string }[] }>(
+      '/api/fs/move',
+      {
+        method: 'POST',
+        body: JSON.stringify({ paths, target_folder }),
+      }
+    ),
+  deleteBatch: (paths: string[]) =>
+    apiFetch<{ deleted: string[] }>('/api/fs/delete-batch', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
     }),
   startKernel: (notebook_path: string) =>
     apiFetch<{ notebook_path: string; status: string; variables: any[] }>('/api/kernels/start', {

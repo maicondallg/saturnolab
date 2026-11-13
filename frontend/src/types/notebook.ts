@@ -20,6 +20,7 @@ export interface NotebookCellData {
   metadata?: Record<string, any>;
   isRunning?: boolean;
   markdownRendered?: boolean;
+  outputCollapsed?: boolean;
 }
 
 export interface KernelVariable {
@@ -36,6 +37,7 @@ export interface FileEntry {
   extension: string;
   size: number;
   modified: string;
+  children?: FileEntry[];
 }
 
 export interface ProviderConfig {
@@ -52,6 +54,14 @@ export interface SaturnoConfig {
   theme: string;
   default_ai_apply_mode?: 'replace_cell' | 'append_cell';
   include_kernel_variables: boolean;
+  notebook_layout?: 'centered' | 'expanded';
+  sidebar_position?: 'left' | 'right';
+  sidebar_width?: number;
+  show_line_numbers?: boolean;
+  auto_scroll_on_run?: boolean;
+  show_modified_time?: boolean;
+  confirm_kernel_restart?: boolean;
+  editor_font_size?: number;
   providers: Record<string, ProviderConfig>;
   codex_status?: {
     cli_installed: boolean;
@@ -105,3 +115,12 @@ export interface LauncherTab {
 }
 
 export type WorkspaceTab = OpenNotebookTab | OpenTextFileTab | LauncherTab;
+
+export interface EditorPane {
+  id: string;
+  tabIds: string[];
+  activeTabId: string;
+  widthRatio: number;
+}
+
+export type SettingsSection = 'appearance' | 'editor' | 'ai' | 'shortcuts';

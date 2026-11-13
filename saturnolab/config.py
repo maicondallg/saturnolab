@@ -36,6 +36,14 @@ class SaturnoConfig(BaseModel):
     theme: str = "graphite"
     default_ai_apply_mode: str = "replace_cell"  # replace_cell | append_cell
     include_kernel_variables: bool = True
+    notebook_layout: str = "centered"  # centered | expanded
+    sidebar_position: str = "left"  # left | right
+    sidebar_width: int = 280
+    show_line_numbers: bool = True
+    auto_scroll_on_run: bool = True
+    show_modified_time: bool = True
+    confirm_kernel_restart: bool = False
+    editor_font_size: int = 14
     providers: dict[str, ProviderSettings] = Field(
         default_factory=lambda: {
             "gemini": ProviderSettings(
@@ -139,6 +147,22 @@ class ConfigManager:
             self._config.default_ai_apply_mode = patch["default_ai_apply_mode"]
         if "include_kernel_variables" in patch:
             self._config.include_kernel_variables = bool(patch["include_kernel_variables"])
+        if "notebook_layout" in patch and patch["notebook_layout"] in ("centered", "expanded"):
+            self._config.notebook_layout = str(patch["notebook_layout"])
+        if "sidebar_position" in patch and patch["sidebar_position"] in ("left", "right"):
+            self._config.sidebar_position = str(patch["sidebar_position"])
+        if "sidebar_width" in patch and isinstance(patch["sidebar_width"], (int, float)):
+            self._config.sidebar_width = max(180, min(640, int(patch["sidebar_width"])))
+        if "show_line_numbers" in patch:
+            self._config.show_line_numbers = bool(patch["show_line_numbers"])
+        if "auto_scroll_on_run" in patch:
+            self._config.auto_scroll_on_run = bool(patch["auto_scroll_on_run"])
+        if "show_modified_time" in patch:
+            self._config.show_modified_time = bool(patch["show_modified_time"])
+        if "confirm_kernel_restart" in patch:
+            self._config.confirm_kernel_restart = bool(patch["confirm_kernel_restart"])
+        if "editor_font_size" in patch and isinstance(patch["editor_font_size"], (int, float)):
+            self._config.editor_font_size = max(11, min(22, int(patch["editor_font_size"])))
         if "providers" in patch and isinstance(patch["providers"], dict):
             for prov_name, prov_data in patch["providers"].items():
                 if not isinstance(prov_data, dict):

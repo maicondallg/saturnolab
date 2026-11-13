@@ -4,6 +4,8 @@ import DOMPurify from 'dompurify';
 import {
   ArrowDown,
   ArrowUp,
+  ChevronDown,
+  ChevronRight,
   Eraser,
   Loader2,
   Play,
@@ -32,6 +34,7 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
     selectCell,
     updateCellSource,
     setMarkdownRendered,
+    toggleCellOutputCollapse,
     changeCellType,
     runCell,
     addCellBelow,
@@ -53,7 +56,6 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
     return DOMPurify.sanitize(parsed);
   }, [cell.cell_type, cell.source]);
 
-  // Crisp JupyterLab-style external left indicator rule (sharp, sober, never bubbly)
   const externalBarColor = !isActive
     ? 'transparent'
     : notebookMode === 'edit'
@@ -62,6 +64,7 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
 
   return (
     <div
+      data-cell-id={cell.id}
       onClick={() => selectCell(cell.id, isActive ? notebookMode : 'command')}
       className="group relative pl-3 py-1"
     >
@@ -116,7 +119,12 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
           }
           title="Alternar Code / Markdown (Ctrl+M)"
           className="px-1.5 py-0.5 rounded-[2px] text-[11.5px] font-mono hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-          style={{ color: 'var(--sat-text-muted)' }}
+          style={{
+            color:
+              cell.cell_type === 'code'
+                ? 'var(--sat-type-py)'
+                : 'var(--sat-type-md)',
+          }}
         >
           {cell.cell_type === 'code' ? 'py' : 'md'}
         </button>
@@ -152,15 +160,34 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
         </button>
 
         {cell.cell_type === 'code' && cell.outputs.length > 0 && (
-          <button
-            type="button"
-            onClick={() => clearCellOutputs(cell.id)}
-            title="Limpar saída"
-            className="p-1 rounded-[2px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-            style={{ color: 'var(--sat-text-muted)' }}
-          >
-            <Eraser size={13} />
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => toggleCellOutputCollapse(cell.id)}
+              title={
+                cell.outputCollapsed
+                  ? 'Expandir saída (O)'
+                  : 'Recolher saída (O)'
+              }
+              className="p-1 rounded-[2px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+              style={{ color: 'var(--sat-text-muted)' }}
+            >
+              {cell.outputCollapsed ? (
+                <ChevronRight size={13} />
+              ) : (
+                <ChevronDown size={13} />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => clearCellOutputs(cell.id)}
+              title="Limpar saída"
+              className="p-1 rounded-[2px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+              style={{ color: 'var(--sat-text-muted)' }}
+            >
+              <Eraser size={13} />
+            </button>
+          </>
         )}
 
         <button
@@ -216,7 +243,7 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
           )}
         </div>
 
-        {/* Cell Box (low 4px radius, crisp 1px border, zero neon glow) */}
+        {/* Cell Box */}
         <div className="flex-1 min-w-0">
           {cell.cell_type === 'markdown' && cell.markdownRendered && !isEditing ? (
             <div
@@ -277,24 +304,52 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
                 onTriggerAI={(selection) => openInlineAI(cell.id, selection)}
               />
 
-              {cell.cell_type === 'code' && cell.outputs.length > 0 && (
-                <CellOutputView
-                  outputs={cell.outputs}
-                  onFixErrorWithAI={(errSummary) => {
-                    selectCell(cell.id, 'edit');
-                    openInlineAI(
-                      cell.id,
-                      null,
-                      'Corrija o erro desta célula mantendo o objetivo do código',
-                      errSummary
-                    );
-                  }}
-                />
-              )}
+              {cell.cell_type === 'code' &&
+                (cell.outputs.length > 0 || cell.isRunning) && (
+                  <div data-cell-output-id={cell.id}>
+                    {cell.outputCollapsed ? (
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleCellOutputCollapse(cell.id);
+                        }}
+                        className="px-3.5 py-1.5 border-t text-xs font-mono flex items-center gap-1.5 cursor-pointer hover:opacity-80"
+                        style={{
+                          backgroundColor: 'var(--sat-bg-canvas)',
+                          borderColor: 'var(--sat-border)',
+                          color: 'var(--sat-text-muted)',
+                        }}
+                      >
+                        <ChevronRight size={13} />
+                        <span>
+                          Saída recolhida ({cell.outputs.length} bloco
+                          {cell.outputs.length > 1 ? 's' : ''}) — clique ou pressione O
+                          para mostrar
+                        </span>
+                      </div>
+                    ) : (
+                      <CellOutputView
+                        outputs={cell.outputs}
+                        onFixErrorWithAI={(errSummary) => {
+                          selectCell(cell.id, 'edit');
+                          openInlineAI(
+                            cell.id,
+                            null,
+                            'Corrija o erro desta célula mantendo o objetivo do código',
+                            errSummary
+                          );
+                        }}
+                      />
+                    )}
+                  </div>
+                )}
             </div>
           )}
         </div>
       </div>
+
+      {/* Bottom anchor for scrolling to cell output/end */}
+      <div data-cell-bottom-id={cell.id} />
     </div>
   );
 };

@@ -30,15 +30,16 @@ def safe_resolve(workspace_root: Path, rel_path: str = "") -> Path:
     return target
 
 
-def list_directory(workspace_root: Path, rel_path: str = "") -> dict[str, Any]:
-    target = safe_resolve(workspace_root, rel_path)
-    if not target.exists():
-        raise FileNotFoundError(f"Caminho não encontrado: {rel_path}")
-    if not target.is_dir():
-        raise ValueError(f"Não é um diretório: {rel_path}")
-
+def _scan_dir_entries(
+    root_resolved: Path, target: Path, recursive: bool = True, depth: int = 0, max_depth: int = 6
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+    try:
+        entries = sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+    except OSError:
+        return items
+
+    for entry in entries:
         if entry.name in IGNORED_NAMES or entry.name.startswith(".DS_Store"):
             continue
         try:
@@ -46,24 +47,43 @@ def list_directory(workspace_root: Path, rel_path: str = "") -> dict[str, Any]:
             is_dir = entry.is_dir()
             ext = entry.suffix.lower() if not is_dir else ""
             item_type = "directory" if is_dir else ("notebook" if ext == ".ipynb" else "file")
-            items.append(
-                {
-                    "name": entry.name,
-                    "path": str(entry.relative_to(workspace_root.resolve())).replace("\\", "/"),
-                    "type": item_type,
-                    "extension": ext,
-                    "size": 0 if is_dir else stat.st_size,
-                    "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                }
-            )
+            item_dict: dict[str, Any] = {
+                "name": entry.name,
+                "path": str(entry.relative_to(root_resolved)).replace("\\", "/"),
+                "type": item_type,
+                "extension": ext,
+                "size": 0 if is_dir else stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+            if is_dir and recursive and depth < max_depth:
+                item_dict["children"] = _scan_dir_entries(
+                    root_resolved, entry, recursive=True, depth=depth + 1, max_depth=max_depth
+                )
+            elif is_dir:
+                item_dict["children"] = []
+            items.append(item_dict)
         except OSError:
             continue
+    return items
+
+
+def list_directory(
+    workspace_root: Path, rel_path: str = "", recursive: bool = True
+) -> dict[str, Any]:
+    root_resolved = workspace_root.resolve()
+    target = safe_resolve(workspace_root, rel_path)
+    if not target.exists():
+        raise FileNotFoundError(f"Caminho não encontrado: {rel_path}")
+    if not target.is_dir():
+        raise ValueError(f"Não é um diretório: {rel_path}")
+
+    items = _scan_dir_entries(root_resolved, target, recursive=recursive)
 
     return {
-        "workspace_root": str(workspace_root.resolve()),
+        "workspace_root": str(root_resolved),
         "current_path": ""
-        if target == workspace_root.resolve()
-        else str(target.relative_to(workspace_root.resolve())).replace("\\", "/"),
+        if target == root_resolved
+        else str(target.relative_to(root_resolved)).replace("\\", "/"),
         "items": items,
     }
 
@@ -342,3 +362,76 @@ def write_text_file(workspace_root: Path, rel_path: str, content: str) -> dict[s
         "saved": True,
         "path": str(target.relative_to(workspace_root.resolve())).replace("\\", "/"),
     }
+
+
+def create_text_file(
+    workspace_root: Path, folder_rel_path: str = "", filename: str = "script.py"
+) -> dict[str, Any]:
+    folder = safe_resolve(workspace_root, folder_rel_path)
+    folder.mkdir(parents=True, exist_ok=True)
+    name = filename.strip() or "script.py"
+    if "/" in name or "\\" in name:
+        raise ValueError("Use apenas o nome do arquivo.")
+    candidate = folder / name
+    if candidate.exists():
+        stem = candidate.stem
+        suffix = candidate.suffix
+        idx = 1
+        while candidate.exists():
+            candidate = folder / f"{stem}_{idx}{suffix}"
+            idx += 1
+    candidate.write_text("", encoding="utf-8")
+    rel = str(candidate.relative_to(workspace_root.resolve())).replace("\\", "/")
+    return read_text_file(workspace_root, rel)
+
+
+def move_entries(
+    workspace_root: Path, paths: list[str], target_folder: str = ""
+) -> dict[str, Any]:
+    root_resolved = workspace_root.resolve()
+    dst_dir = safe_resolve(workspace_root, target_folder)
+    if not dst_dir.exists() or not dst_dir.is_dir():
+        raise ValueError(f"Pasta de destino inválida: {target_folder}")
+
+    moved: list[dict[str, str]] = []
+    for rel_path in paths:
+        src = safe_resolve(workspace_root, rel_path)
+        if not src.exists() or src == root_resolved:
+            continue
+        if src.is_dir() and (dst_dir == src or src in dst_dir.parents):
+            raise ValueError(f"Não é possível mover a pasta '{src.name}' para dentro dela mesma.")
+        dst = (dst_dir / src.name).resolve()
+        if dst == src:
+            continue
+        if root_resolved not in dst.parents:
+            raise PermissionError("Destino fora do diretório de trabalho.")
+        if dst.exists():
+            raise FileExistsError(f"Já existe '{src.name}' na pasta de destino.")
+        src.rename(dst)
+        moved.append(
+            {
+                "old_path": rel_path,
+                "new_path": str(dst.relative_to(root_resolved)).replace("\\", "/"),
+                "name": dst.name,
+            }
+        )
+    return {"moved": moved}
+
+
+def delete_entries(workspace_root: Path, paths: list[str]) -> dict[str, Any]:
+    root_resolved = workspace_root.resolve()
+    deleted: list[str] = []
+    # Sort shortest paths first so parent directories are removed cleanly
+    for rel_path in sorted(set(paths), key=len):
+        try:
+            target = safe_resolve(workspace_root, rel_path)
+        except PermissionError:
+            continue
+        if target == root_resolved or not target.exists():
+            continue
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        deleted.append(rel_path)
+    return {"deleted": deleted}
