@@ -1,8 +1,9 @@
+import { useShallow } from 'zustand/react/shallow';
 import React from 'react';
 import { FileCode, FolderOpen, Settings } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 
-export const LauncherView: React.FC = () => {
+export const LauncherView: React.FC = React.memo(() => {
   const {
     createNewNotebook,
     createNewFile,
@@ -10,7 +11,14 @@ export const LauncherView: React.FC = () => {
     openSettings,
     workspaceRoot,
     config,
-  } = useSaturnoStore();
+  } = useSaturnoStore(useShallow((s) => ({
+    createNewNotebook: s.createNewNotebook,
+    createNewFile: s.createNewFile,
+    setShowFolderModal: s.setShowFolderModal,
+    openSettings: s.openSettings,
+    workspaceRoot: s.workspaceRoot,
+    config: s.config,
+  })));
 
   return (
     <div
@@ -100,4 +108,4 @@ export const LauncherView: React.FC = () => {
       </div>
     </div>
   );
-};
+});

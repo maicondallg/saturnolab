@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { EditorState, Compartment } from '@codemirror/state';
+import { Annotation, EditorState, Compartment } from '@codemirror/state';
 import {
   EditorView,
   keymap,
@@ -18,6 +18,8 @@ import { tags } from '@lezer/highlight';
 import { python } from '@codemirror/lang-python';
 import { markdown } from '@codemirror/lang-markdown';
 import { closeBrackets, autocompletion } from '@codemirror/autocomplete';
+
+const externalSyncAnnotation = Annotation.define<boolean>();
 
 const saturnoHighlightStyle = HighlightStyle.define([
   {
@@ -148,6 +150,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const lastValueRef = useRef<string>((value || '').replace(/\r\n/g, '\n'));
 
   const langCompartment = useRef(new Compartment());
   const themeCompartment = useRef(new Compartment());
@@ -184,6 +187,9 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
 
   useEffect(() => {
     if (!containerRef.current) return;
+
+    const initialNormalized = (value || '').replace(/\r\n/g, '\n');
+    lastValueRef.current = initialNormalized;
 
     const triggerAIHandler = (view: EditorView) => {
       if (!cbRef.current.onTriggerAI) return false;
@@ -293,7 +299,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     ]);
 
     const state = EditorState.create({
-      doc: value,
+      doc: initialNormalized,
       extensions: [
         saturnoKeymap,
         history(),
@@ -311,8 +317,15 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         placeholder ? cmPlaceholder(placeholder) : [],
         EditorView.lineWrapping,
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) {
-            cbRef.current.onChange(update.state.doc.toString());
+          if (
+            update.docChanged &&
+            !update.transactions.some((tr) => tr.annotation(externalSyncAnnotation))
+          ) {
+            const nextDoc = update.state.doc.toString();
+            if (nextDoc !== lastValueRef.current) {
+              lastValueRef.current = nextDoc;
+              cbRef.current.onChange(nextDoc);
+            }
           }
           if (update.focusChanged && update.view.hasFocus) {
             cbRef.current.onFocus?.();
@@ -341,10 +354,13 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const normalizedIncoming = (value || '').replace(/\r\n/g, '\n');
     const currentDoc = view.state.doc.toString();
-    if (value !== currentDoc) {
+    if (normalizedIncoming !== currentDoc) {
+      lastValueRef.current = normalizedIncoming;
       view.dispatch({
-        changes: { from: 0, to: currentDoc.length, insert: value },
+        changes: { from: 0, to: currentDoc.length, insert: normalizedIncoming },
+        annotations: externalSyncAnnotation.of(true),
       });
     }
   }, [value]);

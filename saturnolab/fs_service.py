@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -68,7 +69,7 @@ def _scan_dir_entries(
 
 
 def list_directory(
-    workspace_root: Path, rel_path: str = "", recursive: bool = True
+    workspace_root: Path, rel_path: str = "", recursive: bool = False
 ) -> dict[str, Any]:
     root_resolved = workspace_root.resolve()
     target = safe_resolve(workspace_root, rel_path)
@@ -161,13 +162,21 @@ def read_notebook(workspace_root: Path, rel_path: str) -> dict[str, Any]:
 
     raw_text = target.read_text(encoding="utf-8")
     if not raw_text.strip():
-        nb = nbformat.v4.new_notebook()
-        nb.cells = [nbformat.v4.new_code_cell(source="")]
+        raw_nb: dict[str, Any] = {"cells": [], "metadata": {}}
     else:
-        nb = nbformat.reads(raw_text, as_version=4)
+        try:
+            parsed = json.loads(raw_text)
+            if isinstance(parsed, dict) and parsed.get("nbformat", 4) >= 4:
+                raw_nb = parsed
+            else:
+                nb_obj = nbformat.reads(raw_text, as_version=4)
+                raw_nb = {"cells": nb_obj.cells, "metadata": dict(nb_obj.metadata)}
+        except Exception:
+            nb_obj = nbformat.reads(raw_text, as_version=4)
+            raw_nb = {"cells": nb_obj.cells, "metadata": dict(nb_obj.metadata)}
 
     cells: list[dict[str, Any]] = []
-    for c in nb.cells:
+    for c in raw_nb.get("cells", []):
         cell_id = c.get("id") or uuid.uuid4().hex[:8]
         cell_type = c.get("cell_type", "code")
         if cell_type not in ("code", "markdown"):
@@ -200,7 +209,7 @@ def read_notebook(workspace_root: Path, rel_path: str) -> dict[str, Any]:
     return {
         "path": str(target.relative_to(workspace_root.resolve())).replace("\\", "/"),
         "name": target.name,
-        "metadata": dict(nb.metadata),
+        "metadata": dict(raw_nb.get("metadata", {})),
         "cells": cells,
     }
 
@@ -342,7 +351,9 @@ def read_text_file(workspace_root: Path, rel_path: str, max_bytes: int = 512_000
     target = safe_resolve(workspace_root, rel_path)
     if not target.exists() or target.is_dir():
         raise FileNotFoundError(f"Arquivo não encontrado: {rel_path}")
-    raw = target.read_bytes()
+    with target.open("rb") as handle:
+        size = target.stat().st_size
+        raw = handle.read(max_bytes + 1)
     truncated = len(raw) > max_bytes
     content = raw[:max_bytes].decode("utf-8", errors="replace")
     return {
@@ -350,7 +361,7 @@ def read_text_file(workspace_root: Path, rel_path: str, max_bytes: int = 512_000
         "name": target.name,
         "content": content,
         "truncated": truncated,
-        "size": len(raw),
+        "size": size,
     }
 
 

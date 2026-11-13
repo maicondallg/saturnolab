@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import React from 'react';
 import { Save } from 'lucide-react';
 import { OpenTextFileTab } from '../types/notebook';
@@ -11,9 +12,13 @@ interface Props {
   tab: OpenTextFileTab;
 }
 
-export const TextFileEditor: React.FC<Props> = ({ tab }) => {
-  const { updateTextFileContent, saveTabById, config, showLineNumbers } =
-    useSaturnoStore();
+export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
+  const { updateTextFileContent, saveTabById, config, showLineNumbers } = useSaturnoStore(useShallow((s) => ({
+    updateTextFileContent: s.updateTextFileContent,
+    saveTabById: s.saveTabById,
+    config: s.config,
+    showLineNumbers: s.showLineNumbers,
+  })));
 
   const visual = getFileVisual({ name: tab.name, type: 'file' });
   const darkTheme = isThemeDark(config?.theme);
@@ -28,7 +33,7 @@ export const TextFileEditor: React.FC<Props> = ({ tab }) => {
         }}
       >
         <div className="flex items-center gap-2 min-w-0">
-          <FileTypeIcon name={tab.name} type="file" size={14} showBadge />
+          <FileTypeIcon name={tab.name} type="file" size={14} />
           <span
             className="font-mono text-xs truncate"
             style={{ color: 'var(--sat-text-secondary)' }}
@@ -86,4 +91,4 @@ export const TextFileEditor: React.FC<Props> = ({ tab }) => {
       </div>
     </div>
   );
-};
+});

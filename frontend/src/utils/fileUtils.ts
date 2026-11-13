@@ -183,13 +183,19 @@ export interface FlatTreeNode {
 export function flattenVisibleTree(
   items: FileEntry[],
   expandedFolders: Record<string, boolean>,
+  folderChildren: Record<string, FileEntry[]> = {},
   depth = 0
 ): FlatTreeNode[] {
   const result: FlatTreeNode[] = [];
   for (const item of items) {
     result.push({ entry: item, depth });
-    if (item.type === 'directory' && expandedFolders[item.path] && item.children?.length) {
-      result.push(...flattenVisibleTree(item.children, expandedFolders, depth + 1));
+    if (item.type === 'directory' && expandedFolders[item.path]) {
+      const subItems = folderChildren[item.path] || item.children || [];
+      if (subItems.length > 0) {
+        result.push(
+          ...flattenVisibleTree(subItems, expandedFolders, folderChildren, depth + 1)
+        );
+      }
     }
   }
   return result;
@@ -197,6 +203,7 @@ export function flattenVisibleTree(
 
 export function collectAllFolders(
   items: FileEntry[],
+  folderChildren: Record<string, FileEntry[]> = {},
   excludePaths: Set<string> = new Set()
 ): { path: string; label: string; depth: number }[] {
   const result: { path: string; label: string; depth: number }[] = [
@@ -212,8 +219,9 @@ export function collectAllFolders(
           label: `${'  '.repeat(depth)}📁 ${node.path}`,
           depth,
         });
-        if (node.children?.length) {
-          walk(node.children, depth + 1);
+        const subItems = folderChildren[node.path] || node.children || [];
+        if (subItems.length > 0) {
+          walk(subItems, depth + 1);
         }
       }
     }

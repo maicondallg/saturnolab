@@ -8,6 +8,7 @@ import {
   InlineAIState,
   NotebookCellData,
   OpenNotebookTab,
+  OpenTextFileTab,
   SaturnoConfig,
   SettingsSection,
   WorkspaceTab,
@@ -65,6 +66,7 @@ interface SaturnoStore {
 
   // Tree & Multi-select
   expandedFolders: Record<string, boolean>;
+  folderChildren: Record<string, FileEntry[]>;
   selectedFilePaths: string[];
   lastClickedFilePath: string | null;
   activeFolderContext: string;
@@ -135,7 +137,7 @@ interface SaturnoStore {
   moveTabToPane: (tabId: string, sourcePaneId: string, targetPaneId: string) => void;
   closePane: (paneId: string) => void;
   setPaneWidths: (ratios: Record<string, number>) => void;
-  openLauncher: () => void;
+  openLauncher: (paneId?: string) => void;
   saveActiveTab: () => Promise<void>;
   saveTabById: (tabId: string) => Promise<void>;
   updateTextFileContent: (tabId: string, content: string) => void;
@@ -185,6 +187,8 @@ interface SaturnoStore {
   handleWSMessage: (msg: Record<string, any>) => void;
 }
 
+let initializing = false;
+
 const INITIAL_PANE_ID = 'pane_main';
 
 function loadExpandedFolders(): Record<string, boolean> {
@@ -232,6 +236,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   statusMessage: 'Pronto',
 
   expandedFolders: loadExpandedFolders(),
+  folderChildren: {},
   selectedFilePaths: [],
   lastClickedFilePath: null,
   activeFolderContext: '',
@@ -254,7 +259,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   inlineAI: {},
 
   initialize: async () => {
-    if (get().initialized) return;
+    if (get().initialized || initializing) return;
+    initializing = true;
     wsClient.connect();
     wsClient.subscribe((msg) => get().handleWSMessage(msg));
 
@@ -267,7 +273,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       const fontSize = cfg.editor_font_size || get().editorFontSize || 14;
       document.documentElement.style.setProperty('--sat-editor-font-size', `${fontSize}px`);
 
-      const listing = await api.listDir('', true);
+      const listing = await api.listDir('', false);
       set({
         initialized: true,
         config: { ...cfg, theme: resolvedTheme },
@@ -284,6 +290,29 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         files: listing.items,
       });
 
+      // Load any previously expanded folders in background without blocking
+      const expandedKeys = Object.keys(get().expandedFolders).filter(
+        (k) => get().expandedFolders[k]
+      );
+      if (expandedKeys.length > 0) {
+        Promise.all(
+          expandedKeys.map((p) =>
+            api
+              .listDir(p, false)
+              .then((res) => [p, res.items] as const)
+              .catch(() => null)
+          )
+        ).then((results) => {
+          const patch: Record<string, FileEntry[]> = {};
+          for (const r of results) {
+            if (r) patch[r[0]] = r[1];
+          }
+          if (Object.keys(patch).length > 0) {
+            set((s) => ({ folderChildren: { ...s.folderChildren, ...patch } }));
+          }
+        });
+      }
+
       // Auto-open welcome notebook on initial load if present
       const welcome = listing.items.find(
         (i) => i.type === 'notebook' && i.name.toLowerCase().includes('bem_vindo')
@@ -293,6 +322,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       }
     } catch (err: any) {
       set({ initialized: true, statusMessage: `Erro ao inicializar: ${err.message}` });
+    } finally {
+      initializing = false;
     }
   },
 
@@ -437,11 +468,25 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   setStatusMessage: (msg) => set({ statusMessage: msg }),
 
   toggleFolderExpanded: (path) => {
+    const isNowExpanded = !get().expandedFolders[path];
     set((s) => {
-      const next = { ...s.expandedFolders, [path]: !s.expandedFolders[path] };
+      const next = { ...s.expandedFolders, [path]: isNowExpanded };
       saveExpandedFolders(next);
-      return { expandedFolders: next, activeFolderContext: next[path] ? path : s.activeFolderContext };
+      return {
+        expandedFolders: next,
+        activeFolderContext: isNowExpanded ? path : s.activeFolderContext,
+      };
     });
+    if (isNowExpanded) {
+      api
+        .listDir(path, false)
+        .then((res) => {
+          set((s) => ({
+            folderChildren: { ...s.folderChildren, [path]: res.items },
+          }));
+        })
+        .catch(() => {});
+    }
   },
 
   setFolderExpanded: (path, expanded) => {
@@ -450,6 +495,16 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       saveExpandedFolders(next);
       return { expandedFolders: next };
     });
+    if (expanded) {
+      api
+        .listDir(path, false)
+        .then((res) => {
+          set((s) => ({
+            folderChildren: { ...s.folderChildren, [path]: res.items },
+          }));
+        })
+        .catch(() => {});
+    }
   },
 
   collapseAllFolders: () => {
@@ -508,21 +563,44 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   refreshFiles: async () => {
-    const listing = await api.listDir('', true);
+    const listing = await api.listDir('', false);
     set({
       workspaceRoot: listing.workspace_root,
       currentDir: listing.current_path,
       files: listing.items,
     });
+    const expandedKeys = Object.keys(get().expandedFolders).filter(
+      (k) => get().expandedFolders[k]
+    );
+    if (expandedKeys.length > 0) {
+      Promise.all(
+        expandedKeys.map((p) =>
+          api
+            .listDir(p, false)
+            .then((res) => [p, res.items] as const)
+            .catch(() => null)
+        )
+      ).then((results) => {
+        const patch: Record<string, FileEntry[]> = {};
+        for (const r of results) {
+          if (r) patch[r[0]] = r[1];
+        }
+        if (Object.keys(patch).length > 0) {
+          set((s) => ({ folderChildren: { ...s.folderChildren, ...patch } }));
+        }
+      });
+    }
   },
 
   switchWorkspace: async (newPath) => {
     const res = await api.switchWorkspace(newPath);
-    const fullListing = await api.listDir('', true);
+    saveExpandedFolders({});
     set({
       workspaceRoot: res.workspace_root,
       currentDir: '',
-      files: fullListing.items,
+      files: res.listing.items,
+      expandedFolders: {},
+      folderChildren: {},
       tabs: [{ kind: 'launcher', id: '__launcher__', name: 'Launcher' }],
       panes: [
         {
@@ -552,76 +630,139 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     }
 
     const existing = get().tabs.find((t) => t.id === entry.path);
-    if (!existing) {
-      const fileData = await api.readFile(entry.path);
-      set((s) => ({
-        tabs: [
-          ...s.tabs,
-          {
-            kind: 'file',
-            id: fileData.path,
-            path: fileData.path,
-            name: fileData.name,
-            content: fileData.content,
-            dirty: false,
-          },
-        ],
-      }));
+    if (existing) {
+      if (options?.sideBySide) {
+        get().splitTab(entry.path, options.targetPaneId, 'right');
+      } else {
+        get().setActiveTab(entry.path, options?.targetPaneId);
+      }
+      return;
     }
 
+    const fileData = await api.readFile(entry.path);
+    const cleanContent = (fileData.content || '').replace(/\r\n/g, '\n');
+    const newTab: WorkspaceTab = {
+      kind: 'file',
+      id: fileData.path,
+      path: fileData.path,
+      name: fileData.name,
+      content: cleanContent,
+      dirty: false,
+    };
+
     if (options?.sideBySide) {
-      get().splitTab(entry.path, options.targetPaneId, 'right');
-    } else {
-      get().setActiveTab(entry.path, options?.targetPaneId);
+      set((s) => ({
+        tabs: s.tabs.some((t) => t.id === newTab.id) ? s.tabs : [...s.tabs, newTab],
+      }));
+      get().splitTab(newTab.id, options.targetPaneId, 'right');
+      return;
     }
+
+    // Single atomic state update for instant tab opening
+    set((s) => {
+      const targetPaneId = options?.targetPaneId || s.activePaneId || s.panes[0]?.id;
+      const nextTabs = s.tabs.some((t) => t.id === newTab.id)
+        ? s.tabs
+        : [...s.tabs, newTab];
+      const nextPanes = s.panes.map((p) => {
+        if (p.id !== targetPaneId) return p;
+        const nextTabIds = p.tabIds.includes(newTab.id)
+          ? p.tabIds
+          : [...p.tabIds, newTab.id];
+        return { ...p, tabIds: nextTabIds, activeTabId: newTab.id };
+      });
+      return {
+        tabs: nextTabs,
+        panes: nextPanes,
+        activePaneId: targetPaneId,
+        activeTabId: newTab.id,
+      };
+    });
   },
 
   openNotebookByPath: async (relPath, options) => {
     const existing = get().tabs.find((t) => t.id === relPath);
-    if (!existing) {
-      const nb = await api.readNotebook(relPath);
-      const cells: NotebookCellData[] = nb.cells.map((c: any) => ({
+    if (existing) {
+      if (options?.sideBySide) {
+        get().splitTab(relPath, options.targetPaneId, 'right');
+      } else {
+        get().setActiveTab(relPath, options?.targetPaneId);
+      }
+      return;
+    }
+
+    const nb = await api.readNotebook(relPath);
+    const cells: NotebookCellData[] = nb.cells.map((c: any) => {
+      const cleanSrc = (c.source || '').replace(/\r\n/g, '\n');
+      return {
         ...c,
+        source: cleanSrc,
         isRunning: false,
-        markdownRendered: c.cell_type === 'markdown' && Boolean((c.source || '').trim()),
-      }));
-      const newTab: OpenNotebookTab = {
-        kind: 'notebook',
-        id: nb.path,
-        path: nb.path,
-        name: nb.name,
-        cells,
-        metadata: nb.metadata || {},
-        dirty: false,
-        kernelStatus: nb.kernel_status || 'not_started',
-        variables: nb.variables || [],
-        activeCellId: cells[0]?.id || '',
+        markdownRendered: c.cell_type === 'markdown' && Boolean(cleanSrc.trim()),
       };
+    });
+    const newTab: OpenNotebookTab = {
+      kind: 'notebook',
+      id: nb.path,
+      path: nb.path,
+      name: nb.name,
+      cells,
+      metadata: nb.metadata || {},
+      dirty: false,
+      kernelStatus: nb.kernel_status || 'not_started',
+      variables: nb.variables || [],
+      activeCellId: cells[0]?.id || '',
+    };
+
+    if (options?.sideBySide) {
       set((s) => ({
-        tabs: [...s.tabs, newTab],
+        tabs: s.tabs.some((t) => t.id === newTab.id) ? s.tabs : [...s.tabs, newTab],
         notebookMode: 'command',
       }));
+      get().splitTab(newTab.id, options.targetPaneId, 'right');
+    } else {
+      // Single atomic state update for instant notebook opening
+      set((s) => {
+        const targetPaneId = options?.targetPaneId || s.activePaneId || s.panes[0]?.id;
+        const nextTabs = s.tabs.some((t) => t.id === newTab.id)
+          ? s.tabs
+          : [...s.tabs, newTab];
+        const nextPanes = s.panes.map((p) => {
+          if (p.id !== targetPaneId) return p;
+          const nextTabIds = p.tabIds.includes(newTab.id)
+            ? p.tabIds
+            : [...p.tabIds, newTab.id];
+          return { ...p, tabIds: nextTabIds, activeTabId: newTab.id };
+        });
+        return {
+          tabs: nextTabs,
+          panes: nextPanes,
+          activePaneId: targetPaneId,
+          activeTabId: newTab.id,
+          notebookMode: 'command',
+        };
+      });
+    }
 
-      // Warm up kernel in background
+    // Defer kernel warm-up slightly so UI rendering and file clicks have zero contention
+    window.setTimeout(() => {
       api
         .startKernel(nb.path)
         .then((kres) => {
           set((s) => ({
             tabs: s.tabs.map((t) =>
               t.kind === 'notebook' && t.path === nb.path
-                ? { ...t, kernelStatus: kres.status as any, variables: kres.variables || t.variables }
+                ? {
+                    ...t,
+                    kernelStatus: kres.status as any,
+                    variables: kres.variables || t.variables,
+                  }
                 : t
             ),
           }));
         })
         .catch(() => {});
-    }
-
-    if (options?.sideBySide) {
-      get().splitTab(relPath, options.targetPaneId, 'right');
-    } else {
-      get().setActiveTab(relPath, options?.targetPaneId);
-    }
+    }, 120);
   },
 
   createNewNotebook: async (folder) => {
@@ -630,7 +771,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     if (targetFolder) {
       get().setFolderExpanded(targetFolder, true);
     }
-    await get().refreshFiles();
+    get().refreshFiles();
     await get().openNotebookByPath(nb.path);
     set({ statusMessage: `Notebook criado: ${nb.name}` });
   },
@@ -638,25 +779,42 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   createNewFile: async (folder, name = 'script.py') => {
     const targetFolder = folder !== undefined ? folder : get().activeFolderContext || '';
     const fileData = await api.createFile(targetFolder, name);
+    const normalizedContent = (fileData.content || '').replace(/\r\n/g, '\n');
     if (targetFolder) {
       get().setFolderExpanded(targetFolder, true);
     }
-    await get().refreshFiles();
-    set((s) => ({
-      tabs: [
-        ...s.tabs,
-        {
-          kind: 'file',
-          id: fileData.path,
-          path: fileData.path,
-          name: fileData.name,
-          content: fileData.content,
-          dirty: false,
-        },
-      ],
-      statusMessage: `Arquivo criado: ${fileData.name}`,
-    }));
-    get().setActiveTab(fileData.path);
+    get().refreshFiles();
+    set((s) => {
+      const targetPaneId = s.activePaneId || s.panes[0]?.id;
+      const nextPanes = s.panes.map((p) =>
+        p.id === targetPaneId
+          ? {
+              ...p,
+              tabIds: p.tabIds.includes(fileData.path)
+                ? p.tabIds
+                : [...p.tabIds, fileData.path],
+              activeTabId: fileData.path,
+            }
+          : p
+      );
+      return {
+        tabs: [
+          ...s.tabs,
+          {
+            kind: 'file',
+            id: fileData.path,
+            path: fileData.path,
+            name: fileData.name,
+            content: normalizedContent,
+            dirty: false,
+          },
+        ],
+        panes: nextPanes,
+        activePaneId: targetPaneId,
+        activeTabId: fileData.path,
+        statusMessage: `Arquivo criado: ${fileData.name}`,
+      };
+    });
   },
 
   createNewFolder: async (name, parentFolder) => {
@@ -1023,14 +1181,14 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     }));
   },
 
-  openLauncher: () => {
+  openLauncher: (paneId) => {
     const existing = get().tabs.find((t) => t.kind === 'launcher');
     if (!existing) {
       set((s) => ({
         tabs: [...s.tabs, { kind: 'launcher', id: '__launcher__', name: 'Launcher' }],
       }));
     }
-    get().setActiveTab('__launcher__');
+    get().setActiveTab('__launcher__', paneId || get().activePaneId);
   },
 
   saveActiveTab: async () => {
@@ -1048,7 +1206,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         ),
         statusMessage: `Salvo: ${tab.name}`,
       }));
-      await get().refreshFiles();
+      get().refreshFiles();
     } else if (tab.kind === 'file') {
       await api.saveFile(tab.path, tab.content);
       set((s) => ({
@@ -1057,16 +1215,22 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         ),
         statusMessage: `Arquivo salvo: ${tab.name}`,
       }));
-      await get().refreshFiles();
+      get().refreshFiles();
     }
   },
 
   updateTextFileContent: (tabId, content) => {
-    set((s) => ({
-      tabs: s.tabs.map((t) =>
-        t.id === tabId && t.kind === 'file' ? { ...t, content, dirty: true } : t
-      ),
-    }));
+    set((s) => {
+      const target = s.tabs.find((t) => t.id === tabId && t.kind === 'file') as
+        | OpenTextFileTab
+        | undefined;
+      if (!target || target.content === content) return s;
+      return {
+        tabs: s.tabs.map((t) =>
+          t.id === tabId && t.kind === 'file' ? { ...t, content, dirty: true } : t
+        ),
+      };
+    });
   },
 
   setNotebookMode: (mode) => set({ notebookMode: mode }),
@@ -1097,17 +1261,24 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   updateCellSource: (cellId, source) => {
-    set((s) => ({
-      tabs: s.tabs.map((t) =>
-        t.id === s.activeTabId && t.kind === 'notebook'
-          ? {
-              ...t,
-              dirty: true,
-              cells: t.cells.map((c) => (c.id === cellId ? { ...c, source } : c)),
-            }
-          : t
-      ),
-    }));
+    set((s) => {
+      const activeNb = s.tabs.find(
+        (t): t is OpenNotebookTab => t.id === s.activeTabId && t.kind === 'notebook'
+      );
+      const targetCell = activeNb?.cells.find((c) => c.id === cellId);
+      if (!targetCell || targetCell.source === source) return s;
+      return {
+        tabs: s.tabs.map((t) =>
+          t.id === s.activeTabId && t.kind === 'notebook'
+            ? {
+                ...t,
+                dirty: true,
+                cells: t.cells.map((c) => (c.id === cellId ? { ...c, source } : c)),
+              }
+            : t
+        ),
+      };
+    });
   },
 
   setMarkdownRendered: (cellId, rendered) => {

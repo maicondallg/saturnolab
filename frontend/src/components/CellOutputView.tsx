@@ -13,7 +13,7 @@ interface Props {
   onFixErrorWithAI: (errorSummary: string) => void;
 }
 
-export const CellOutputView: React.FC<Props> = ({ outputs, onFixErrorWithAI }) => {
+export const CellOutputView: React.FC<Props> = React.memo(({ outputs, onFixErrorWithAI }) => {
   if (!outputs || outputs.length === 0) return null;
 
   return (
@@ -136,4 +136,4 @@ export const CellOutputView: React.FC<Props> = ({ outputs, onFixErrorWithAI }) =
       })}
     </div>
   );
-};
+});

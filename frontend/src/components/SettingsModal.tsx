@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useState } from 'react';
 import {
   Check,
@@ -17,7 +18,7 @@ import { useSaturnoStore } from '../store/useSaturnoStore';
 import { SATURNO_THEMES, normalizeThemeId } from '../themes';
 import { SettingsSection } from '../types/notebook';
 
-export const SettingsModal: React.FC = () => {
+export const SettingsModal: React.FC = React.memo(() => {
   const {
     showSettingsModal,
     settingsSection,
@@ -42,7 +43,31 @@ export const SettingsModal: React.FC = () => {
     setShowModifiedTime,
     confirmKernelRestart,
     setConfirmKernelRestart,
-  } = useSaturnoStore();
+  } = useSaturnoStore(useShallow((s) => ({
+    showSettingsModal: s.showSettingsModal,
+    settingsSection: s.settingsSection,
+    openSettings: s.openSettings,
+    closeSettings: s.closeSettings,
+    config: s.config,
+    updateConfig: s.updateConfig,
+    setTheme: s.setTheme,
+    notebookLayout: s.notebookLayout,
+    setNotebookLayout: s.setNotebookLayout,
+    sidebarPosition: s.sidebarPosition,
+    setSidebarPosition: s.setSidebarPosition,
+    sidebarWidth: s.sidebarWidth,
+    setSidebarWidth: s.setSidebarWidth,
+    editorFontSize: s.editorFontSize,
+    setEditorFontSize: s.setEditorFontSize,
+    showLineNumbers: s.showLineNumbers,
+    toggleLineNumbers: s.toggleLineNumbers,
+    autoScrollOnRun: s.autoScrollOnRun,
+    setAutoScrollOnRun: s.setAutoScrollOnRun,
+    showModifiedTime: s.showModifiedTime,
+    setShowModifiedTime: s.setShowModifiedTime,
+    confirmKernelRestart: s.confirmKernelRestart,
+    setConfirmKernelRestart: s.setConfirmKernelRestart,
+  })));
 
   const activeProvider = config?.active_provider || 'gemini';
   const [selectedProvider, setSelectedProvider] = useState<
@@ -70,6 +95,19 @@ export const SettingsModal: React.FC = () => {
     setDefaultApplyMode(config.default_ai_apply_mode || 'replace_cell');
     setIncludeVars(config.include_kernel_variables ?? true);
   }, [config, showSettingsModal]);
+
+  useEffect(() => {
+    if (!showSettingsModal) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeSettings();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [showSettingsModal, closeSettings]);
 
   const handleSelectProvider = (
     prov: 'gemini' | 'codex' | 'openai_compatible' | 'anthropic'
@@ -133,8 +171,11 @@ export const SettingsModal: React.FC = () => {
       ],
     },
     {
-      title: 'Execução e Edição Direta',
+      title: 'Execução, Abas e Interface',
       items: [
+        { desc: 'Mostrar / esconder barra lateral (Arquivos e Variáveis)', keys: 'Ctrl + B' },
+        { desc: 'Fechar aba rapidamente', keys: 'Clique do Meio (Scroll)' },
+        { desc: 'Fechar janela de Configurações', keys: 'Esc' },
         { desc: 'Executar célula e avançar (auto-scroll para resultado)', keys: 'Shift + Enter' },
         { desc: 'Executar célula atual', keys: 'Ctrl + Enter' },
         { desc: 'Executar e inserir nova abaixo', keys: 'Alt + Enter' },
@@ -956,4 +997,4 @@ export const SettingsModal: React.FC = () => {
       </div>
     </div>
   );
-};
+});

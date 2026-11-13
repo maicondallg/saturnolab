@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import React from 'react';
 import {
   ChevronDown,
@@ -10,7 +11,7 @@ import {
 } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 
-export const MenuBar: React.FC = () => {
+export const MenuBar: React.FC = React.memo(() => {
   const {
     config,
     workspaceRoot,
@@ -20,7 +21,16 @@ export const MenuBar: React.FC = () => {
     statusMessage,
     setShowFolderModal,
     openSettings,
-  } = useSaturnoStore();
+  } = useSaturnoStore(useShallow((s) => ({
+    config: s.config,
+    workspaceRoot: s.workspaceRoot,
+    leftSidebar: s.leftSidebar,
+    setLeftSidebar: s.setLeftSidebar,
+    sidebarPosition: s.sidebarPosition,
+    statusMessage: s.statusMessage,
+    setShowFolderModal: s.setShowFolderModal,
+    openSettings: s.openSettings,
+  })));
 
   const activeProvider = config?.active_provider || 'gemini';
   const activeModel = config?.providers?.[activeProvider]?.model;
@@ -42,7 +52,7 @@ export const MenuBar: React.FC = () => {
 
   return (
     <header
-      className="h-10 px-3 flex items-center justify-between select-none border-b shrink-0"
+      className="h-10 px-3 flex items-center justify-between select-none border-b shrink-0 gap-2 overflow-x-auto"
       style={{
         backgroundColor: 'var(--sat-bg-surface)',
         borderColor: 'var(--sat-border)',
@@ -54,7 +64,7 @@ export const MenuBar: React.FC = () => {
         {sidebarPosition === 'left' && (
           <button
             onClick={() => setLeftSidebar(leftSidebar ? null : 'files')}
-            title="Alternar painel lateral"
+            title="Alternar painel lateral (Ctrl+B)"
             className="p-1.5 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
             style={{ color: leftSidebar ? 'var(--sat-accent)' : 'var(--sat-text-secondary)' }}
           >
@@ -154,7 +164,7 @@ export const MenuBar: React.FC = () => {
         {sidebarPosition === 'right' && (
           <button
             onClick={() => setLeftSidebar(leftSidebar ? null : 'files')}
-            title="Alternar painel lateral"
+            title="Alternar painel lateral (Ctrl+B)"
             className="p-1.5 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
             style={{ color: leftSidebar ? 'var(--sat-accent)' : 'var(--sat-text-secondary)' }}
           >
@@ -164,4 +174,4 @@ export const MenuBar: React.FC = () => {
       </div>
     </header>
   );
-};
+});

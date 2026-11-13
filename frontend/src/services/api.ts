@@ -43,7 +43,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
-  listDir: (path = '', recursive = true) =>
+  listDir: (path = '', recursive = false) =>
     apiFetch<{ workspace_root: string; current_path: string; items: FileEntry[] }>(
       `/api/fs/list?path=${encodeURIComponent(path)}&recursive=${recursive ? 'true' : 'false'}`
     ),

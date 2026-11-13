@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from . import __version__, fs_service
@@ -21,6 +22,16 @@ from .llm_service import stream_inline_generation, strip_markdown_fences
 async def lifespan(_app: FastAPI):
     yield
     await kernel_registry.shutdown_all()
+
+
+# Preserve serialized filesystem operations (including read/write ordering),
+# while allowing the event loop to serve kernel messages and other endpoints.
+filesystem_lock = asyncio.Lock()
+
+
+async def run_filesystem(operation, *args, **kwargs):
+    async with filesystem_lock:
+        return await run_in_threadpool(operation, *args, **kwargs)
 
 
 app = FastAPI(title="SaturnoLab", version=__version__, lifespan=lifespan)
@@ -136,7 +147,7 @@ async def switch_workspace(req: WorkspaceSwitchRequest) -> dict[str, Any]:
         new_ws = config_manager.set_workspace_path(req.path)
         return {
             "workspace_root": str(new_ws),
-            "listing": fs_service.list_directory(new_ws, ""),
+            "listing": await run_filesystem(fs_service.list_directory, new_ws, ""),
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -144,10 +155,11 @@ async def switch_workspace(req: WorkspaceSwitchRequest) -> dict[str, Any]:
 
 @app.get("/api/fs/list")
 async def api_list_dir(
-    path: str = Query(default=""), recursive: bool = Query(default=True)
+    path: str = Query(default=""), recursive: bool = Query(default=False)
 ) -> dict[str, Any]:
     try:
-        return fs_service.list_directory(
+        return await run_filesystem(
+            fs_service.list_directory,
             config_manager.get_workspace_path(), path, recursive=recursive
         )
     except FileNotFoundError as exc:
@@ -160,7 +172,7 @@ async def api_list_dir(
 async def api_read_notebook(path: str = Query(...)) -> dict[str, Any]:
     try:
         ws = config_manager.get_workspace_path()
-        nb = fs_service.read_notebook(ws, path)
+        nb = await run_filesystem(fs_service.read_notebook, ws, path)
         existing = kernel_registry.get_existing(ws, nb["path"])
         nb["kernel_status"] = existing.status if existing else "not_started"
         nb["variables"] = existing.variables_cache if existing else []
@@ -174,7 +186,8 @@ async def api_read_notebook(path: str = Query(...)) -> dict[str, Any]:
 @app.post("/api/fs/notebook/save")
 async def api_save_notebook(req: SaveNotebookRequest) -> dict[str, Any]:
     try:
-        return fs_service.save_notebook(
+        return await run_filesystem(
+            fs_service.save_notebook,
             config_manager.get_workspace_path(),
             req.path,
             req.cells,
@@ -187,7 +200,8 @@ async def api_save_notebook(req: SaveNotebookRequest) -> dict[str, Any]:
 @app.post("/api/fs/notebook/create")
 async def api_create_notebook(req: CreateNotebookRequest) -> dict[str, Any]:
     try:
-        return fs_service.create_notebook(
+        return await run_filesystem(
+            fs_service.create_notebook,
             config_manager.get_workspace_path(),
             req.folder,
             req.name,
@@ -199,7 +213,8 @@ async def api_create_notebook(req: CreateNotebookRequest) -> dict[str, Any]:
 @app.post("/api/fs/folder/create")
 async def api_create_folder(req: CreateFolderRequest) -> dict[str, Any]:
     try:
-        return fs_service.create_folder(
+        return await run_filesystem(
+            fs_service.create_folder,
             config_manager.get_workspace_path(),
             req.folder,
             req.name,
@@ -213,7 +228,7 @@ async def api_rename(req: RenameRequest) -> dict[str, Any]:
     try:
         ws = config_manager.get_workspace_path()
         await kernel_registry.shutdown_notebook(ws, req.old_path)
-        return fs_service.rename_entry(ws, req.old_path, req.new_name)
+        return await run_filesystem(fs_service.rename_entry, ws, req.old_path, req.new_name)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -223,7 +238,7 @@ async def api_delete(path: str = Query(...)) -> dict[str, Any]:
     try:
         ws = config_manager.get_workspace_path()
         await kernel_registry.shutdown_notebook(ws, path)
-        return fs_service.delete_entry(ws, path)
+        return await run_filesystem(fs_service.delete_entry, ws, path)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -231,7 +246,7 @@ async def api_delete(path: str = Query(...)) -> dict[str, Any]:
 @app.get("/api/fs/file")
 async def api_read_file(path: str = Query(...)) -> dict[str, Any]:
     try:
-        return fs_service.read_text_file(config_manager.get_workspace_path(), path)
+        return await run_filesystem(fs_service.read_text_file, config_manager.get_workspace_path(), path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -241,7 +256,8 @@ async def api_read_file(path: str = Query(...)) -> dict[str, Any]:
 @app.post("/api/fs/file/save")
 async def api_save_file(req: SaveFileRequest) -> dict[str, Any]:
     try:
-        return fs_service.write_text_file(
+        return await run_filesystem(
+            fs_service.write_text_file,
             config_manager.get_workspace_path(), req.path, req.content
         )
     except Exception as exc:
@@ -251,7 +267,8 @@ async def api_save_file(req: SaveFileRequest) -> dict[str, Any]:
 @app.post("/api/fs/file/create")
 async def api_create_file(req: CreateFileRequest) -> dict[str, Any]:
     try:
-        return fs_service.create_text_file(
+        return await run_filesystem(
+            fs_service.create_text_file,
             config_manager.get_workspace_path(), req.folder, req.name
         )
     except Exception as exc:
@@ -264,7 +281,7 @@ async def api_move_entries(req: MoveEntriesRequest) -> dict[str, Any]:
         ws = config_manager.get_workspace_path()
         for p in req.paths:
             await kernel_registry.shutdown_notebook(ws, p)
-        return fs_service.move_entries(ws, req.paths, req.target_folder)
+        return await run_filesystem(fs_service.move_entries, ws, req.paths, req.target_folder)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -275,7 +292,7 @@ async def api_delete_batch(req: DeleteBatchRequest) -> dict[str, Any]:
         ws = config_manager.get_workspace_path()
         for p in req.paths:
             await kernel_registry.shutdown_notebook(ws, p)
-        return fs_service.delete_entries(ws, req.paths)
+        return await run_filesystem(fs_service.delete_entries, ws, req.paths)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useRef } from 'react';
 import {
   Eraser,
@@ -19,7 +20,7 @@ interface Props {
   isActivePane?: boolean;
 }
 
-export const NotebookView: React.FC<Props> = ({ tab, isActivePane = true }) => {
+export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = true }) => {
   const {
     notebookMode,
     notebookLayout,
@@ -45,7 +46,32 @@ export const NotebookView: React.FC<Props> = ({ tab, isActivePane = true }) => {
     interruptKernel,
     restartKernel,
     openInlineAI,
-  } = useSaturnoStore();
+  } = useSaturnoStore(useShallow((s) => ({
+    notebookMode: s.notebookMode,
+    notebookLayout: s.notebookLayout,
+    toggleNotebookLayout: s.toggleNotebookLayout,
+    scrollSignal: s.scrollSignal,
+    saveTabById: s.saveTabById,
+    addCellAbove: s.addCellAbove,
+    addCellBelow: s.addCellBelow,
+    cutCell: s.cutCell,
+    copyCell: s.copyCell,
+    pasteCellBelow: s.pasteCellBelow,
+    deleteCell: s.deleteCell,
+    undoDeleteCell: s.undoDeleteCell,
+    moveCell: s.moveCell,
+    changeCellType: s.changeCellType,
+    clearAllOutputs: s.clearAllOutputs,
+    selectCell: s.selectCell,
+    setMarkdownRendered: s.setMarkdownRendered,
+    toggleCellOutputCollapse: s.toggleCellOutputCollapse,
+    toggleLineNumbers: s.toggleLineNumbers,
+    runCell: s.runCell,
+    runAllCells: s.runAllCells,
+    interruptKernel: s.interruptKernel,
+    restartKernel: s.restartKernel,
+    openInlineAI: s.openInlineAI,
+  })));
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lastChordRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
@@ -303,7 +329,12 @@ export const NotebookView: React.FC<Props> = ({ tab, isActivePane = true }) => {
     <div className="flex flex-col h-full overflow-hidden">
       {/* Sober Technical Notebook Toolbar */}
       <div
-        className="h-9 px-3 flex items-center justify-between border-b shrink-0 select-none gap-2 overflow-x-auto"
+        onWheel={(e) => {
+          if (e.deltaY !== 0) {
+            e.currentTarget.scrollLeft += e.deltaY;
+          }
+        }}
+        className="h-9 px-3 flex items-center justify-between border-b shrink-0 select-none gap-2 overflow-x-auto overflow-y-hidden no-scrollbar"
         style={{
           backgroundColor: 'var(--sat-bg-surface)',
           borderColor: 'var(--sat-border)',
@@ -520,4 +551,4 @@ export const NotebookView: React.FC<Props> = ({ tab, isActivePane = true }) => {
       </div>
     </div>
   );
-};
+});

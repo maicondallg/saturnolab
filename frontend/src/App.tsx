@@ -1,18 +1,22 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
+import React, { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { Columns2, Plus, Rocket, X } from 'lucide-react';
 import { useSaturnoStore } from './store/useSaturnoStore';
 import { MenuBar } from './components/MenuBar';
 import { LeftSidebar } from './components/LeftSidebar';
-import { NotebookView } from './components/NotebookView';
 import { LauncherView } from './components/LauncherView';
-import { TextFileEditor } from './components/TextFileEditor';
-import { FolderPickerModal } from './components/FolderPickerModal';
-import { SettingsModal } from './components/SettingsModal';
 import { FileTypeIcon } from './components/FileTypeIcon';
 import { FileEntry } from './types/notebook';
 
+const NotebookView = lazy(() => import('./components/NotebookView').then((m) => ({ default: m.NotebookView })));
+const TextFileEditor = lazy(() => import('./components/TextFileEditor').then((m) => ({ default: m.TextFileEditor })));
+const FolderPickerModal = lazy(() => import('./components/FolderPickerModal').then((m) => ({ default: m.FolderPickerModal })));
+const SettingsModal = lazy(() => import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal })));
+
 export const App: React.FC = () => {
   const {
+    showFolderModal,
+    showSettingsModal,
     initialize,
     tabs,
     panes,
@@ -25,9 +29,26 @@ export const App: React.FC = () => {
     moveTabToPane,
     closePane,
     setPaneWidths,
-    createNewNotebook,
+    openLauncher,
     openEntry,
-  } = useSaturnoStore();
+  } = useSaturnoStore(useShallow((s) => ({
+    showFolderModal: s.showFolderModal,
+    showSettingsModal: s.showSettingsModal,
+    initialize: s.initialize,
+    tabs: s.tabs,
+    panes: s.panes,
+    activePaneId: s.activePaneId,
+    sidebarPosition: s.sidebarPosition,
+    setActivePane: s.setActivePane,
+    setActiveTab: s.setActiveTab,
+    closeTab: s.closeTab,
+    splitTab: s.splitTab,
+    moveTabToPane: s.moveTabToPane,
+    closePane: s.closePane,
+    setPaneWidths: s.setPaneWidths,
+    openLauncher: s.openLauncher,
+    openEntry: s.openEntry,
+  })));
 
   const [dragDropZone, setDragDropZone] = useState<{
     paneId: string;
@@ -39,6 +60,23 @@ export const App: React.FC = () => {
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === 'b'
+      ) {
+        e.preventDefault();
+        const curr = useSaturnoStore.getState().leftSidebar;
+        useSaturnoStore.getState().setLeftSidebar(curr ? null : 'files');
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const startPaneResize = (e: React.MouseEvent, leftPaneIdx: number) => {
     e.preventDefault();
@@ -125,10 +163,10 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden">
+    <div className="h-dvh w-full flex flex-col overflow-hidden">
       <MenuBar />
 
-      <div className="flex-1 flex min-h-0 overflow-hidden">
+      <div className="relative flex-1 flex min-h-0 overflow-hidden">
         {sidebarPosition === 'left' && <LeftSidebar />}
 
         <main
@@ -186,16 +224,40 @@ export const App: React.FC = () => {
                 >
                   {/* Pane Tab Bar */}
                   <div
-                    className="h-9 flex items-stretch justify-between border-b select-none shrink-0"
+                    className="h-9 flex items-stretch justify-between border-b select-none shrink-0 overflow-hidden"
                     style={{
                       backgroundColor: 'var(--sat-bg-subtle)',
                       borderColor: 'var(--sat-border)',
                     }}
                   >
-                    <div className="flex items-stretch overflow-x-auto min-w-0 flex-1">
+                    <div
+                      onWheel={(e) => {
+                        if (e.deltaY !== 0) {
+                          e.currentTarget.scrollLeft += e.deltaY;
+                        }
+                      }}
+                      className="flex items-stretch overflow-x-auto overflow-y-hidden no-scrollbar min-w-0 flex-1"
+                    >
                       {paneTabs.map((tab) => {
                         const isSelected = tab.id === activeTab?.id;
                         const isDirty = tab.kind !== 'launcher' && tab.dirty;
+
+                        const requestCloseTab = () => {
+                          const openInOtherPane = panes.some(
+                            (p) =>
+                              p.id !== pane.id && p.tabIds.includes(tab.id)
+                          );
+                          if (
+                            isDirty &&
+                            !openInOtherPane &&
+                            !window.confirm(
+                              `Fechar "${tab.name}" sem salvar alterações?`
+                            )
+                          ) {
+                            return;
+                          }
+                          closeTab(tab.id, pane.id);
+                        };
 
                         return (
                           <div
@@ -211,7 +273,20 @@ export const App: React.FC = () => {
                               );
                               e.dataTransfer.effectAllowed = 'move';
                             }}
+                            onMouseDown={(e) => {
+                              if (e.button === 1) {
+                                e.preventDefault();
+                              }
+                            }}
+                            onAuxClick={(e) => {
+                              if (e.button === 1) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                requestCloseTab();
+                              }
+                            }}
                             onClick={() => setActiveTab(tab.id, pane.id)}
+                            title={`${tab.name} (Clique do meio para fechar)`}
                             className="group/tab px-3 flex items-center gap-2 border-r text-xs cursor-pointer shrink-0 max-w-[240px] transition-colors"
                             style={{
                               backgroundColor: isSelected
@@ -263,22 +338,9 @@ export const App: React.FC = () => {
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  const openInOtherPane = panes.some(
-                                    (p) =>
-                                      p.id !== pane.id && p.tabIds.includes(tab.id)
-                                  );
-                                  if (
-                                    isDirty &&
-                                    !openInOtherPane &&
-                                    !window.confirm(
-                                      `Fechar "${tab.name}" sem salvar alterações?`
-                                    )
-                                  ) {
-                                    return;
-                                  }
-                                  closeTab(tab.id, pane.id);
+                                  requestCloseTab();
                                 }}
-                                title="Fechar aba"
+                                title="Fechar aba (ou clique com botão do meio)"
                                 className="p-0.5 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
                               >
                                 {isDirty ? (
@@ -298,9 +360,9 @@ export const App: React.FC = () => {
                       <button
                         onClick={() => {
                           setActivePane(pane.id);
-                          createNewNotebook();
+                          openLauncher(pane.id);
                         }}
-                        title="Novo Notebook neste painel"
+                        title="Abrir Launcher"
                         className="px-2.5 flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer shrink-0"
                         style={{ color: 'var(--sat-text-muted)' }}
                       >
@@ -340,16 +402,18 @@ export const App: React.FC = () => {
 
                   {/* Active Tab Content */}
                   <div className="flex-1 min-h-0 overflow-hidden relative">
-                    {activeTab?.kind === 'notebook' && (
-                      <NotebookView
-                        tab={activeTab}
-                        isActivePane={isPaneFocused}
-                      />
-                    )}
-                    {activeTab?.kind === 'launcher' && <LauncherView />}
-                    {activeTab?.kind === 'file' && (
-                      <TextFileEditor tab={activeTab} />
-                    )}
+                    <Suspense fallback={<div role="status" className="p-4 text-sm">Carregando…</div>}>
+                      {activeTab?.kind === 'notebook' && (
+                        <NotebookView
+                          tab={activeTab}
+                          isActivePane={isPaneFocused}
+                        />
+                      )}
+                      {activeTab?.kind === 'launcher' && <LauncherView />}
+                      {activeTab?.kind === 'file' && (
+                        <TextFileEditor tab={activeTab} />
+                      )}
+                    </Suspense>
 
                     {/* Visual Drop Zone Overlay when dragging a tab or file */}
                     {dropInfo && (
@@ -406,8 +470,10 @@ export const App: React.FC = () => {
         {sidebarPosition === 'right' && <LeftSidebar />}
       </div>
 
-      <FolderPickerModal />
-      <SettingsModal />
+      <Suspense fallback={null}>
+        {showFolderModal && <FolderPickerModal />}
+        {showSettingsModal && <SettingsModal />}
+      </Suspense>
     </div>
   );
 };

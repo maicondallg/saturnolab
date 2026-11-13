@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useRef } from 'react';
 import {
   Check,
@@ -17,7 +18,7 @@ interface Props {
   hasExistingCode: boolean;
 }
 
-export const InlineAIPopover: React.FC<Props> = ({
+export const InlineAIPopover: React.FC<Props> = React.memo(({
   cellId,
   aiState,
   hasExistingCode,
@@ -30,7 +31,15 @@ export const InlineAIPopover: React.FC<Props> = ({
     acceptInlineAI,
     closeInlineAI,
     setShowAIModal,
-  } = useSaturnoStore();
+  } = useSaturnoStore(useShallow((s) => ({
+    setInlineAIPrompt: s.setInlineAIPrompt,
+    setInlineAIApplyMode: s.setInlineAIApplyMode,
+    submitInlineAI: s.submitInlineAI,
+    cancelInlineAI: s.cancelInlineAI,
+    acceptInlineAI: s.acceptInlineAI,
+    closeInlineAI: s.closeInlineAI,
+    setShowAIModal: s.setShowAIModal,
+  })));
 
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -458,4 +467,4 @@ export const InlineAIPopover: React.FC<Props> = ({
       )}
     </div>
   );
-};
+});

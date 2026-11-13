@@ -75,8 +75,15 @@ def _python_bin_in_env(env_dir: Path) -> Path:
     return env_dir / "bin" / "python"
 
 
+_ENV_CACHE: dict[str, tuple[str, str]] = {}
+
+
 def _resolve_kernel_environment(workspace_dir: Path) -> tuple[str, str]:
     """Return (python_executable, extra_site_packages_dir_or_empty)."""
+    cache_key = str(workspace_dir.resolve())
+    if cache_key in _ENV_CACHE:
+        return _ENV_CACHE[cache_key]
+
     candidates: list[Path] = []
 
     # 1. Workspace-local virtual environments take top priority
@@ -119,7 +126,9 @@ def _resolve_kernel_environment(workspace_dir: Path) -> tuple[str, str]:
             if probe.returncode == 0:
                 info = json.loads(probe.stdout.strip())
                 if info.get("has_ipykernel"):
-                    return str(cand), ""
+                    res = (str(cand), "")
+                    _ENV_CACHE[cache_key] = res
+                    return res
                 if (
                     not fallback_site_dir
                     and info.get("ver") == list(sys.version_info[:2])
@@ -129,7 +138,9 @@ def _resolve_kernel_environment(workspace_dir: Path) -> tuple[str, str]:
         except Exception:
             continue
 
-    return sys.executable, fallback_site_dir
+    res = (sys.executable, fallback_site_dir)
+    _ENV_CACHE[cache_key] = res
+    return res
 
 
 class NotebookKernelSession:
@@ -368,19 +379,22 @@ class NotebookKernelSession:
 class SaturnoKernelRegistry:
     def __init__(self) -> None:
         self._sessions: dict[str, NotebookKernelSession] = {}
-        self._lock = asyncio.Lock()
+        self._locks: dict[str, asyncio.Lock] = {}
 
     async def get_or_create(
         self, workspace_root: Path, notebook_rel_path: str
     ) -> NotebookKernelSession:
         key = str((workspace_root / notebook_rel_path).resolve())
-        async with self._lock:
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
             session = self._sessions.get(key)
             if session and await session.km.is_alive():
                 return session
             nb_full = (workspace_root / notebook_rel_path).resolve()
             nb_cwd = nb_full.parent if nb_full.parent.exists() else workspace_root.resolve()
-            py_exe, extra_site = _resolve_kernel_environment(workspace_root.resolve())
+            py_exe, extra_site = await asyncio.to_thread(
+                _resolve_kernel_environment, workspace_root.resolve()
+            )
             session = NotebookKernelSession(
                 notebook_path=notebook_rel_path,
                 cwd=nb_cwd,

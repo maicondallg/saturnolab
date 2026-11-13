@@ -1,11 +1,16 @@
+import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useState } from 'react';
 import { ArrowUp, Folder, Home, X } from 'lucide-react';
 import { api } from '../services/api';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 
-export const FolderPickerModal: React.FC = () => {
-  const { showFolderModal, setShowFolderModal, workspaceRoot, switchWorkspace } =
-    useSaturnoStore();
+export const FolderPickerModal: React.FC = React.memo(() => {
+  const { showFolderModal, setShowFolderModal, workspaceRoot, switchWorkspace } = useSaturnoStore(useShallow((s) => ({
+    showFolderModal: s.showFolderModal,
+    setShowFolderModal: s.setShowFolderModal,
+    workspaceRoot: s.workspaceRoot,
+    switchWorkspace: s.switchWorkspace,
+  })));
   const [pathInput, setPathInput] = useState(workspaceRoot);
   const [dirs, setDirs] = useState<{ name: string; path: string }[]>([]);
   const [parentDir, setParentDir] = useState<string | null>(null);
@@ -30,6 +35,19 @@ export const FolderPickerModal: React.FC = () => {
       loadDirs(workspaceRoot);
     }
   }, [showFolderModal, workspaceRoot]);
+
+  useEffect(() => {
+    if (!showFolderModal) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setShowFolderModal(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [showFolderModal, setShowFolderModal]);
 
   if (!showFolderModal) return null;
 
@@ -155,4 +173,4 @@ export const FolderPickerModal: React.FC = () => {
       </div>
     </div>
   );
-};
+});

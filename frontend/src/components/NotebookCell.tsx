@@ -1,4 +1,5 @@
-import React, { useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
+import React, { useMemo, useCallback } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import {
@@ -25,12 +26,12 @@ interface Props {
   isActive: boolean;
 }
 
-export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
+export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => {
   const {
     config,
     notebookMode,
     showLineNumbers,
-    inlineAI,
+    aiState,
     selectCell,
     updateCellSource,
     setMarkdownRendered,
@@ -43,9 +44,31 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
     clearCellOutputs,
     saveActiveTab,
     openInlineAI,
-  } = useSaturnoStore();
+  } = useSaturnoStore(useShallow((s) => ({
+    config: s.config,
+    notebookMode: isActive ? s.notebookMode : 'command',
+    showLineNumbers: s.showLineNumbers,
+    aiState: s.inlineAI[cell.id],
+    selectCell: s.selectCell,
+    updateCellSource: s.updateCellSource,
+    setMarkdownRendered: s.setMarkdownRendered,
+    toggleCellOutputCollapse: s.toggleCellOutputCollapse,
+    changeCellType: s.changeCellType,
+    runCell: s.runCell,
+    addCellBelow: s.addCellBelow,
+    deleteCell: s.deleteCell,
+    moveCell: s.moveCell,
+    clearCellOutputs: s.clearCellOutputs,
+    saveActiveTab: s.saveActiveTab,
+    openInlineAI: s.openInlineAI,
+  })));
 
-  const aiState = inlineAI[cell.id];
+  const fixErrorWithAI = useCallback((errSummary: string) => {
+    selectCell(cell.id, 'edit');
+    openInlineAI(cell.id, null,
+      'Corrija o erro desta célula mantendo o objetivo do código', errSummary);
+  }, [cell.id, selectCell, openInlineAI]);
+
   const isEditing = isActive && notebookMode === 'edit';
   const darkTheme = isThemeDark(config?.theme);
 
@@ -330,15 +353,7 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
                     ) : (
                       <CellOutputView
                         outputs={cell.outputs}
-                        onFixErrorWithAI={(errSummary) => {
-                          selectCell(cell.id, 'edit');
-                          openInlineAI(
-                            cell.id,
-                            null,
-                            'Corrija o erro desta célula mantendo o objetivo do código',
-                            errSummary
-                          );
-                        }}
+                        onFixErrorWithAI={fixErrorWithAI}
                       />
                     )}
                   </div>
@@ -352,4 +367,4 @@ export const NotebookCell: React.FC<Props> = ({ cell, isActive }) => {
       <div data-cell-bottom-id={cell.id} />
     </div>
   );
-};
+});

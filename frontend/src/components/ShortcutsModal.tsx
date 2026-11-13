@@ -1,9 +1,13 @@
+import { useShallow } from 'zustand/react/shallow';
 import React from 'react';
 import { Keyboard, X } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 
-export const ShortcutsModal: React.FC = () => {
-  const { showShortcutsModal, setShowShortcutsModal } = useSaturnoStore();
+export const ShortcutsModal: React.FC = React.memo(() => {
+  const { showShortcutsModal, setShowShortcutsModal } = useSaturnoStore(useShallow((s) => ({
+    showShortcutsModal: s.showShortcutsModal,
+    setShowShortcutsModal: s.setShowShortcutsModal,
+  })));
 
   if (!showShortcutsModal) return null;
 
@@ -109,4 +113,4 @@ export const ShortcutsModal: React.FC = () => {
       </div>
     </div>
   );
-};
+});

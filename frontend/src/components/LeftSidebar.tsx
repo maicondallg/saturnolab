@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import React, { useMemo, useRef, useState } from 'react';
 import {
   CheckSquare,
@@ -6,8 +7,6 @@ import {
   ChevronsDownUp,
   Columns2,
   Database,
-  FileCode,
-  FilePlus,
   Folder,
   FolderInput,
   FolderPlus,
@@ -29,7 +28,7 @@ import {
 } from '../utils/fileUtils';
 import { FileTypeIcon } from './FileTypeIcon';
 
-export const LeftSidebar: React.FC = () => {
+export const LeftSidebar: React.FC = React.memo(() => {
   const {
     leftSidebar,
     setLeftSidebar,
@@ -40,6 +39,7 @@ export const LeftSidebar: React.FC = () => {
     showModifiedTime,
     files,
     expandedFolders,
+    folderChildren,
     toggleFolderExpanded,
     collapseAllFolders,
     activeFolderContext,
@@ -51,31 +51,59 @@ export const LeftSidebar: React.FC = () => {
     clearFileSelection,
     refreshFiles,
     openEntry,
-    createNewNotebook,
-    createNewFile,
     createNewFolder,
     renameEntry,
     deleteEntry,
     deleteBatchEntries,
     moveEntries,
-    tabs,
+    activeVariables,
     activeTabId,
-  } = useSaturnoStore();
+  } = useSaturnoStore(useShallow((s) => ({
+    leftSidebar: s.leftSidebar,
+    setLeftSidebar: s.setLeftSidebar,
+    sidebarPosition: s.sidebarPosition,
+    toggleSidebarPosition: s.toggleSidebarPosition,
+    sidebarWidth: s.sidebarWidth,
+    setSidebarWidth: s.setSidebarWidth,
+    showModifiedTime: s.showModifiedTime,
+    files: s.files,
+    expandedFolders: s.expandedFolders,
+    folderChildren: s.folderChildren,
+    toggleFolderExpanded: s.toggleFolderExpanded,
+    collapseAllFolders: s.collapseAllFolders,
+    activeFolderContext: s.activeFolderContext,
+    setActiveFolderContext: s.setActiveFolderContext,
+    selectedFilePaths: s.selectedFilePaths,
+    toggleFileSelection: s.toggleFileSelection,
+    selectFileRange: s.selectFileRange,
+    selectAllFiles: s.selectAllFiles,
+    clearFileSelection: s.clearFileSelection,
+    refreshFiles: s.refreshFiles,
+    openEntry: s.openEntry,
+    createNewFolder: s.createNewFolder,
+    renameEntry: s.renameEntry,
+    deleteEntry: s.deleteEntry,
+    deleteBatchEntries: s.deleteBatchEntries,
+    moveEntries: s.moveEntries,
+    activeTabId: s.activeTabId,
+    activeVariables: s.tabs.find(
+      (t): t is OpenNotebookTab => t.id === s.activeTabId && t.kind === 'notebook'
+    )?.variables,
+  })));
 
-  const [createMode, setCreateMode] = useState<'folder' | 'file' | null>(null);
+  const [createMode, setCreateMode] = useState<'folder' | null>(null);
   const [newItemName, setNewItemName] = useState('');
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameVal, setRenameVal] = useState('');
   const [showMoveMenu, setShowMoveMenu] = useState(false);
   const [moveTargetFolder, setMoveTargetFolder] = useState('');
-  const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
   const [isResizing, setIsResizing] = useState(false);
 
   const sidebarRef = useRef<HTMLElement>(null);
 
   const visibleNodes = useMemo(
-    () => flattenVisibleTree(files, expandedFolders),
-    [files, expandedFolders]
+    () => flattenVisibleTree(files, expandedFolders, folderChildren),
+    [files, expandedFolders, folderChildren]
   );
 
   const visiblePaths = useMemo(
@@ -84,15 +112,12 @@ export const LeftSidebar: React.FC = () => {
   );
 
   const availableDestinationFolders = useMemo(
-    () => collectAllFolders(files, new Set(selectedFilePaths)),
-    [files, selectedFilePaths]
+    () => collectAllFolders(files, folderChildren, new Set(selectedFilePaths)),
+    [files, folderChildren, selectedFilePaths]
   );
 
   if (!leftSidebar) return null;
 
-  const activeNotebook = tabs.find(
-    (t): t is OpenNotebookTab => t.id === activeTabId && t.kind === 'notebook'
-  );
 
   const hasSelection = selectedFilePaths.length > 0;
 
@@ -152,22 +177,6 @@ export const LeftSidebar: React.FC = () => {
     }
   };
 
-  const handleDropOnFolder = async (e: React.DragEvent, targetFolder: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOverFolder(null);
-    const raw = e.dataTransfer.getData('application/x-saturno-paths');
-    if (!raw) return;
-    try {
-      const paths: string[] = JSON.parse(raw);
-      if (paths.length > 0) {
-        await moveEntries(paths, targetFolder);
-      }
-    } catch {
-      // ignore invalid drag payload
-    }
-  };
-
   return (
     <aside
       ref={sidebarRef}
@@ -176,8 +185,8 @@ export const LeftSidebar: React.FC = () => {
         backgroundColor: 'var(--sat-bg-surface)',
         borderColor: 'var(--sat-border)',
       }}
-      className={`relative flex flex-col h-full shrink-0 select-none overflow-hidden ${
-        sidebarPosition === 'left' ? 'border-r' : 'border-l'
+      className={`relative max-md:absolute max-md:inset-y-0 max-md:z-20 max-md:max-w-[calc(100%-48px)] flex flex-col h-full shrink-0 select-none overflow-hidden ${
+        sidebarPosition === 'left' ? 'border-r max-md:left-0' : 'border-l max-md:right-0'
       }`}
     >
       {/* Flush Header Tabs: Arquivos | Variáveis + Position Toggle */}
@@ -227,7 +236,7 @@ export const LeftSidebar: React.FC = () => {
         >
           <Database size={13} />
           <span>Variáveis</span>
-          {activeNotebook && activeNotebook.variables.length > 0 && (
+          {activeVariables && activeVariables.length > 0 && (
             <span
               className="text-[10.5px] px-1.5 rounded-[2px] font-mono"
               style={{
@@ -235,7 +244,7 @@ export const LeftSidebar: React.FC = () => {
                 color: 'var(--sat-text-primary)',
               }}
             >
-              {activeNotebook.variables.length}
+              {activeVariables.length}
             </span>
           )}
         </button>
@@ -260,46 +269,38 @@ export const LeftSidebar: React.FC = () => {
       {/* 1. ARQUIVOS (Tree Explorer) */}
       {leftSidebar === 'files' && (
         <>
-          {/* Action Toolbar */}
+          {/* Compact Header / Action Toolbar (without + Notebook / .py buttons) */}
           <div
-            className="px-2 py-1.5 flex items-center justify-between border-b gap-1"
+            className="h-8 px-2.5 flex items-center justify-between border-b gap-1 shrink-0"
             style={{ borderColor: 'var(--sat-border-subtle)' }}
           >
-            <div className="flex items-center gap-1 min-w-0">
-              <button
-                onClick={() => createNewNotebook(activeFolderContext)}
-                title={
-                  activeFolderContext
-                    ? `Novo Notebook em /${activeFolderContext}`
-                    : 'Novo Notebook na raiz'
-                }
-                className="h-7 px-2 rounded-[3px] border text-xs font-medium flex items-center gap-1 cursor-pointer hover:opacity-90 transition-opacity shrink-0"
-                style={{
-                  backgroundColor: 'var(--sat-bg-subtle)',
-                  borderColor: 'var(--sat-border)',
-                  color: 'var(--sat-text-primary)',
-                }}
-              >
-                <FilePlus size={13} style={{ color: 'var(--sat-orange)' }} />
-                <span>+ Notebook</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setCreateMode((m) => (m === 'file' ? null : 'file'));
-                  setNewItemName('script.py');
-                }}
-                title="Criar novo arquivo (.py, .md, .txt...)"
-                className="h-7 px-2 rounded-[3px] border text-xs font-medium flex items-center gap-1 cursor-pointer hover:opacity-90 transition-opacity shrink-0"
-                style={{
-                  backgroundColor: 'var(--sat-bg-subtle)',
-                  borderColor: 'var(--sat-border)',
-                  color: 'var(--sat-text-primary)',
-                }}
-              >
-                <FileCode size={13} style={{ color: 'var(--sat-type-py)' }} />
-                <span>.py</span>
-              </button>
+            <div className="flex items-center gap-1.5 min-w-0 text-[11px] font-mono truncate">
+              {activeFolderContext ? (
+                <>
+                  <span
+                    className="truncate"
+                    style={{ color: 'var(--sat-text-secondary)' }}
+                    title={`Pasta ativa: /${activeFolderContext}`}
+                  >
+                    /{activeFolderContext}
+                  </span>
+                  <button
+                    onClick={() => setActiveFolderContext('')}
+                    title="Voltar contexto para a raiz /"
+                    className="p-0.5 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
+                    style={{ color: 'var(--sat-text-muted)' }}
+                  >
+                    <X size={11} />
+                  </button>
+                </>
+              ) : (
+                <span
+                  className="uppercase tracking-wider text-[10.5px] font-sans font-medium"
+                  style={{ color: 'var(--sat-text-muted)' }}
+                >
+                  Workspace
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-0.5 shrink-0">
@@ -309,7 +310,7 @@ export const LeftSidebar: React.FC = () => {
                   setNewItemName('');
                 }}
                 title="Nova Pasta"
-                className="p-1.5 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                className="p-1 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
                 style={{ color: 'var(--sat-text-secondary)' }}
               >
                 <FolderPlus size={14} />
@@ -317,7 +318,7 @@ export const LeftSidebar: React.FC = () => {
               <button
                 onClick={collapseAllFolders}
                 title="Recolher todas as pastas"
-                className="p-1.5 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                className="p-1 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
                 style={{ color: 'var(--sat-text-secondary)' }}
               >
                 <ChevronsDownUp size={13} />
@@ -325,7 +326,7 @@ export const LeftSidebar: React.FC = () => {
               <button
                 onClick={() => refreshFiles()}
                 title="Atualizar árvore de arquivos"
-                className="p-1.5 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                className="p-1 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
                 style={{ color: 'var(--sat-text-secondary)' }}
               >
                 <RefreshCw size={13} />
@@ -333,41 +334,14 @@ export const LeftSidebar: React.FC = () => {
             </div>
           </div>
 
-          {/* Active target folder indicator when creating inside a subfolder */}
-          {activeFolderContext && (
-            <div
-              className="px-2.5 py-1 text-[11px] flex items-center justify-between border-b font-mono"
-              style={{
-                backgroundColor: 'var(--sat-bg-subtle)',
-                borderColor: 'var(--sat-border-subtle)',
-                color: 'var(--sat-text-secondary)',
-              }}
-            >
-              <span className="truncate" title={`Pasta alvo: /${activeFolderContext}`}>
-                Alvo: /{activeFolderContext}
-              </span>
-              <button
-                onClick={() => setActiveFolderContext('')}
-                title="Voltar alvo para a raiz /"
-                className="px-1 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
-              >
-                <X size={11} />
-              </button>
-            </div>
-          )}
-
-          {/* Create Folder or File Inline Input */}
+          {/* Create Folder Inline Input */}
           {createMode && (
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
                 const clean = newItemName.trim();
                 if (!clean) return;
-                if (createMode === 'folder') {
-                  await createNewFolder(clean, activeFolderContext);
-                } else {
-                  await createNewFile(activeFolderContext, clean);
-                }
+                await createNewFolder(clean, activeFolderContext);
                 setNewItemName('');
                 setCreateMode(null);
               }}
@@ -379,8 +353,7 @@ export const LeftSidebar: React.FC = () => {
             >
               <div className="text-[11px] font-medium flex items-center justify-between">
                 <span style={{ color: 'var(--sat-text-secondary)' }}>
-                  {createMode === 'folder' ? 'Nova pasta' : 'Novo arquivo'}{' '}
-                  {activeFolderContext ? `em /${activeFolderContext}` : 'na raiz /'}
+                  Nova pasta {activeFolderContext ? `em /${activeFolderContext}` : 'na raiz /'}
                 </span>
                 <button
                   type="button"
@@ -395,9 +368,7 @@ export const LeftSidebar: React.FC = () => {
                   autoFocus
                   value={newItemName}
                   onChange={(e) => setNewItemName(e.target.value)}
-                  placeholder={
-                    createMode === 'folder' ? 'Nome da pasta...' : 'Ex: analise.py'
-                  }
+                  placeholder="Nome da pasta..."
                   className="flex-1 px-2 py-1 text-xs rounded-[3px] border bg-transparent font-mono focus:outline-none"
                   style={{ borderColor: 'var(--sat-border)' }}
                 />
@@ -560,21 +531,7 @@ export const LeftSidebar: React.FC = () => {
           )}
 
           {/* Tree View List */}
-          <div
-            className="flex-1 overflow-y-auto py-1"
-            onDragOver={(e) => {
-              e.preventDefault();
-              if (e.target === e.currentTarget) {
-                setDragOverFolder('__root__');
-              }
-            }}
-            onDragLeave={(e) => {
-              if (e.target === e.currentTarget) {
-                setDragOverFolder(null);
-              }
-            }}
-            onDrop={(e) => handleDropOnFolder(e, '')}
-          >
+          <div className="flex-1 overflow-y-auto py-1">
             {visibleNodes.length === 0 && (
               <div
                 className="px-4 py-8 text-center text-xs"
@@ -590,47 +547,11 @@ export const LeftSidebar: React.FC = () => {
               const isRenaming = renamingPath === item.path;
               const isDir = item.type === 'directory';
               const isExpanded = Boolean(expandedFolders[item.path]);
-              const isDropTarget = isDir && dragOverFolder === item.path;
               const modTimeStr = showModifiedTime ? formatModifiedShort(item.modified) : '';
 
               return (
                 <div
                   key={item.path}
-                  draggable={!isRenaming}
-                  onDragStart={(e) => {
-                    const pathsToDrag = isSelected
-                      ? selectedFilePaths
-                      : [item.path];
-                    e.dataTransfer.setData(
-                      'application/x-saturno-paths',
-                      JSON.stringify(pathsToDrag)
-                    );
-                    e.dataTransfer.setData(
-                      'application/x-saturno-entry',
-                      JSON.stringify(item)
-                    );
-                    e.dataTransfer.effectAllowed = 'copyMove';
-                  }}
-                  onDragOver={(e) => {
-                    if (isDir) {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setDragOverFolder(item.path);
-                    }
-                  }}
-                  onDragLeave={(e) => {
-                    if (isDir) {
-                      e.stopPropagation();
-                      if (dragOverFolder === item.path) {
-                        setDragOverFolder(null);
-                      }
-                    }
-                  }}
-                  onDrop={(e) => {
-                    if (isDir) {
-                      handleDropOnFolder(e, item.path);
-                    }
-                  }}
                   onClick={(e) => handleRowClick(e, item)}
                   title={formatModifiedTooltip(item)}
                   style={{
@@ -638,14 +559,12 @@ export const LeftSidebar: React.FC = () => {
                     paddingRight: '8px',
                     color: 'var(--sat-text-primary)',
                   }}
-                  className={`saturno-file-row group py-1.5 text-[13px] flex items-center justify-between gap-1.5 cursor-pointer ${
+                  className={`saturno-file-row group h-7 text-[13px] flex items-center justify-between gap-1.5 cursor-pointer ${
                     isActive ? 'is-active' : ''
-                  } ${isSelected ? 'is-selected' : ''} ${
-                    isDropTarget ? 'is-drop-target' : ''
-                  }`}
+                  } ${isSelected ? 'is-selected' : ''}`}
                 >
                   {/* Left: Checkbox + Chevron (if folder) + Colorful Icon + Name */}
-                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1 h-full">
                     {/* Multi-select checkbox (visible on hover or when any item is selected) */}
                     <button
                       type="button"
@@ -658,7 +577,7 @@ export const LeftSidebar: React.FC = () => {
                         }
                       }}
                       title="Selecionar item (Ctrl+Clique ou Shift+Clique)"
-                      className={`shrink-0 p-0.5 rounded-[2px] cursor-pointer transition-opacity ${
+                      className={`shrink-0 h-5 w-4 inline-flex items-center justify-center rounded-[2px] cursor-pointer transition-opacity ${
                         isSelected || hasSelection
                           ? 'opacity-100'
                           : 'opacity-0 group-hover:opacity-75 hover:!opacity-100'
@@ -685,7 +604,7 @@ export const LeftSidebar: React.FC = () => {
                         )}
                       </span>
                     ) : (
-                      <span className="w-1 shrink-0" />
+                      <span className="w-0.5 shrink-0" />
                     )}
 
                     <FileTypeIcon
@@ -693,7 +612,6 @@ export const LeftSidebar: React.FC = () => {
                       type={item.type}
                       isOpenFolder={isExpanded}
                       size={15}
-                      showBadge={!isDir}
                     />
 
                     {isRenaming ? (
@@ -714,13 +632,13 @@ export const LeftSidebar: React.FC = () => {
                           value={renameVal}
                           onChange={(e) => setRenameVal(e.target.value)}
                           onBlur={() => setRenamingPath(null)}
-                          className="w-full px-1.5 py-0.5 text-xs border rounded-[2px] bg-transparent font-mono"
+                          className="w-full h-5 px-1.5 text-xs border rounded-[2px] bg-transparent font-mono"
                           style={{ borderColor: 'var(--sat-border)' }}
                         />
                       </form>
                     ) : (
                       <span
-                        className={`truncate ${
+                        className={`truncate leading-none ${
                           isActive || isSelected ? 'font-medium' : ''
                         }`}
                       >
@@ -731,10 +649,10 @@ export const LeftSidebar: React.FC = () => {
 
                   {/* Right: Modification Time (hidden on hover when action buttons appear) + Action Buttons */}
                   {!isRenaming && (
-                    <div className="flex items-center gap-1 shrink-0">
+                    <div className="flex items-center justify-end gap-1 shrink-0 h-5">
                       {modTimeStr && (
                         <span
-                          className="group-hover:hidden text-[10.5px] font-mono opacity-65 whitespace-nowrap"
+                          className="group-hover:hidden text-[10.5px] leading-none font-mono opacity-65 whitespace-nowrap"
                           style={{ color: 'var(--sat-text-muted)' }}
                         >
                           {modTimeStr}
@@ -742,14 +660,14 @@ export const LeftSidebar: React.FC = () => {
                       )}
 
                       <div
-                        className="hidden group-hover:flex items-center gap-0.5 shrink-0"
+                        className="hidden group-hover:flex items-center gap-0.5 shrink-0 h-5"
                         onClick={(e) => e.stopPropagation()}
                       >
                         {!isDir && (
                           <button
                             onClick={() => openEntry(item, { sideBySide: true })}
                             title="Abrir lado a lado (Split View)"
-                            className="p-1 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+                            className="h-5 w-5 inline-flex items-center justify-center rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
                             style={{ color: 'var(--sat-text-secondary)' }}
                           >
                             <Columns2 size={12} />
@@ -761,7 +679,7 @@ export const LeftSidebar: React.FC = () => {
                             setRenameVal(item.name);
                           }}
                           title="Renomear"
-                          className="p-1 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+                          className="h-5 w-5 inline-flex items-center justify-center rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
                           style={{ color: 'var(--sat-text-secondary)' }}
                         >
                           <Pencil size={12} />
@@ -773,7 +691,7 @@ export const LeftSidebar: React.FC = () => {
                             }
                           }}
                           title="Excluir"
-                          className="p-1 rounded-[2px] hover:bg-red-500/15 text-red-500 cursor-pointer"
+                          className="h-5 w-5 inline-flex items-center justify-center rounded-[2px] hover:bg-red-500/15 text-red-500 cursor-pointer"
                         >
                           <Trash2 size={12} />
                         </button>
@@ -790,14 +708,14 @@ export const LeftSidebar: React.FC = () => {
       {/* 2. VARIÁVEIS EM MEMÓRIA */}
       {leftSidebar === 'variables' && (
         <div className="flex-1 overflow-y-auto p-2.5 space-y-2">
-          {!activeNotebook ? (
+          {!activeVariables ? (
             <p
               className="text-xs py-8 text-center"
               style={{ color: 'var(--sat-text-muted)' }}
             >
               Abra um notebook para inspecionar variáveis em memória.
             </p>
-          ) : activeNotebook.variables.length === 0 ? (
+          ) : activeVariables.length === 0 ? (
             <p
               className="text-xs py-8 px-2 text-center leading-relaxed"
               style={{ color: 'var(--sat-text-muted)' }}
@@ -806,7 +724,7 @@ export const LeftSidebar: React.FC = () => {
               estado do kernel.
             </p>
           ) : (
-            activeNotebook.variables.map((v) => (
+            activeVariables.map((v) => (
               <div
                 key={v.name}
                 className="p-2.5 rounded-[4px] border space-y-1"
@@ -858,4 +776,4 @@ export const LeftSidebar: React.FC = () => {
       />
     </aside>
   );
-};
+});

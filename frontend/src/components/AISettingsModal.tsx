@@ -1,9 +1,15 @@
+import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useState } from 'react';
 import { Check, Sparkles, X } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 
-export const AISettingsModal: React.FC = () => {
-  const { showAIModal, setShowAIModal, config, updateConfig } = useSaturnoStore();
+export const AISettingsModal: React.FC = React.memo(() => {
+  const { showAIModal, setShowAIModal, config, updateConfig } = useSaturnoStore(useShallow((s) => ({
+    showAIModal: s.showAIModal,
+    setShowAIModal: s.setShowAIModal,
+    config: s.config,
+    updateConfig: s.updateConfig,
+  })));
 
   const activeProvider = config?.active_provider || 'gemini';
   const [selectedProvider, setSelectedProvider] = useState<
@@ -375,4 +381,4 @@ export const AISettingsModal: React.FC = () => {
       </div>
     </div>
   );
-};
+});
