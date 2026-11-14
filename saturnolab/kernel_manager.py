@@ -424,9 +424,12 @@ class SaturnoKernelRegistry:
 
     async def shutdown_notebook(self, workspace_root: Path, notebook_rel_path: str) -> None:
         key = str((workspace_root / notebook_rel_path).resolve())
-        session = self._sessions.pop(key, None)
-        if session:
-            await session.shutdown()
+        # A filesystem operation may target a folder containing open notebooks.
+        keys = [active for active in self._sessions if active == key or active.startswith(key + "/")]
+        for active in keys:
+            session = self._sessions.pop(active, None)
+            if session:
+                await session.shutdown()
 
     async def shutdown_all(self) -> None:
         for s in list(self._sessions.values()):

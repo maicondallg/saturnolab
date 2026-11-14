@@ -18,7 +18,7 @@ function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
-export type LeftSidebarTab = 'files' | 'variables' | null;
+export type LeftSidebarTab = 'files' | 'variables' | 'outline' | null;
 
 interface DeletedCellRecord {
   notebookPath: string;
@@ -147,6 +147,7 @@ interface SaturnoStore {
   selectCell: (cellId: string, mode?: 'command' | 'edit', scrollIntoView?: boolean) => void;
   updateCellSource: (cellId: string, source: string) => void;
   setMarkdownRendered: (cellId: string, rendered: boolean) => void;
+  toggleSection: (cellId: string) => void;
   toggleCellOutputCollapse: (cellId?: string) => void;
   changeCellType: (cellId: string, cellType: CellType) => void;
   addCellAbove: (targetCellId?: string, cellType?: CellType) => string | null;
@@ -548,8 +549,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       const rangePaths = visiblePaths.slice(from, to + 1);
       const merged = Array.from(new Set([...s.selectedFilePaths, ...rangePaths]));
       return {
-        selectedFilePaths: merged,
-        lastClickedFilePath: targetPath,
+        selectedFilePaths: rangePaths,
+        lastClickedFilePath: anchor,
       };
     });
   },
@@ -691,12 +692,16 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       return;
     }
 
-    const nb = await api.readNotebook(relPath);
+    set({ statusMessage: `Abrindo ${relPath.split('/').pop()}…` });
+    let nb;
+    try { nb = await api.readNotebook(relPath); }
+    catch (error) { set({ statusMessage: `Erro ao abrir notebook: ${String(error)}` }); throw error; }
     const cells: NotebookCellData[] = nb.cells.map((c: any) => {
       const cleanSrc = (c.source || '').replace(/\r\n/g, '\n');
       return {
         ...c,
         source: cleanSrc,
+        outputCollapsed: get().config?.output_display === 'collapsed',
         isRunning: false,
         markdownRendered: c.cell_type === 'markdown' && Boolean(cleanSrc.trim()),
       };
@@ -743,6 +748,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         };
       });
     }
+
+    set({ statusMessage: 'Pronto' });
 
     // Defer kernel warm-up slightly so UI rendering and file clicks have zero contention
     window.setTimeout(() => {
@@ -888,11 +895,16 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     await get().refreshFiles();
 
     const moveMap = new Map(res.moved.map((m) => [m.old_path, m]));
+    // Moving a folder also changes the identity of every open descendant.
+    for (const tab of get().tabs) {
+      const parent = res.moved.find(m => tab.id.startsWith(m.old_path + '/'));
+      if (parent) moveMap.set(tab.id, {old_path: tab.id, new_path: parent.new_path + tab.id.slice(parent.old_path.length), name: tab.name});
+    }
     set((s) => {
       const updatedTabs = s.tabs.map((t) => {
         const m = moveMap.get(t.id);
         return m
-          ? ({ ...t, id: m.new_path, path: m.new_path, name: m.name } as WorkspaceTab)
+          ? ({ ...t, id: m.new_path, path: m.new_path, name: m.name, ...(t.kind === 'notebook' ? {kernelStatus: 'stopped', variables: [], cells: t.cells.map(c => ({...c, isRunning: false}))} : {}) } as WorkspaceTab)
           : t;
       });
       const updatedPanes = s.panes.map((p) => ({
@@ -1296,6 +1308,11 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     }));
   },
 
+  toggleSection: (cellId) => set(s => ({ tabs: s.tabs.map(t => {
+    if (t.id !== s.activeTabId || t.kind !== 'notebook') return t;
+    return { ...t, activeCellId: cellId, cells: t.cells.map(c => c.id === cellId ? { ...c, sectionCollapsed: !c.sectionCollapsed } : c) };
+  }), notebookMode: 'command' })),
+
   toggleCellOutputCollapse: (cellId) => {
     const tab = get().tabs.find((t) => t.id === get().activeTabId);
     if (!tab || tab.kind !== 'notebook') return;
@@ -1615,7 +1632,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
                 kernelStatus: 'busy',
                 cells: t.cells.map((c) =>
                   c.id === cell.id
-                    ? { ...c, outputs: [], isRunning: true, outputCollapsed: false }
+                    ? { ...c, outputs: [], isRunning: true, outputCollapsed: get().config?.output_display === 'collapsed' }
                     : c
                 ),
               }

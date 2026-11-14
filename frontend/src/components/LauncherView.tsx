@@ -39,7 +39,7 @@ export const LauncherView: React.FC = React.memo(() => {
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           <button
             onClick={() => createNewNotebook()}
-            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:opacity-90 transition-opacity cursor-pointer text-left"
+            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:!bg-[var(--sat-bg-hover)] transition-colors cursor-pointer text-left"
             style={{
               backgroundColor: 'var(--sat-bg-surface)',
               borderColor: 'var(--sat-border)',
@@ -56,7 +56,7 @@ export const LauncherView: React.FC = React.memo(() => {
 
           <button
             onClick={() => createNewFile(undefined, 'script.py')}
-            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:opacity-90 transition-opacity cursor-pointer text-left"
+            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:!bg-[var(--sat-bg-hover)] transition-colors cursor-pointer text-left"
             style={{
               backgroundColor: 'var(--sat-bg-surface)',
               borderColor: 'var(--sat-border)',
@@ -73,7 +73,7 @@ export const LauncherView: React.FC = React.memo(() => {
 
           <button
             onClick={() => setShowFolderModal(true)}
-            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:opacity-90 transition-opacity cursor-pointer text-left"
+            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:!bg-[var(--sat-bg-hover)] transition-colors cursor-pointer text-left"
             style={{
               backgroundColor: 'var(--sat-bg-surface)',
               borderColor: 'var(--sat-border)',
@@ -90,7 +90,7 @@ export const LauncherView: React.FC = React.memo(() => {
 
           <button
             onClick={() => openSettings('appearance')}
-            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:opacity-90 transition-opacity cursor-pointer text-left"
+            className="p-4 rounded-[4px] border flex flex-col items-start gap-2.5 hover:!bg-[var(--sat-bg-hover)] transition-colors cursor-pointer text-left"
             style={{
               backgroundColor: 'var(--sat-bg-surface)',
               borderColor: 'var(--sat-border)',

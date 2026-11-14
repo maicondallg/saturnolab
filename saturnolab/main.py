@@ -275,12 +275,21 @@ async def api_create_file(req: CreateFileRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/fs/copy")
+async def api_copy_entries(req: MoveEntriesRequest) -> dict[str, Any]:
+    try:
+        return await run_filesystem(fs_service.copy_entries, config_manager.get_workspace_path(), req.paths, req.target_folder)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/fs/move")
 async def api_move_entries(req: MoveEntriesRequest) -> dict[str, Any]:
     try:
         ws = config_manager.get_workspace_path()
-        for p in req.paths:
-            await kernel_registry.shutdown_notebook(ws, p)
+        planned = await run_filesystem(fs_service.plan_move_entries, ws, req.paths, req.target_folder)
+        for _, _, path in planned:
+            await kernel_registry.shutdown_notebook(ws, path)
         return await run_filesystem(fs_service.move_entries, ws, req.paths, req.target_folder)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

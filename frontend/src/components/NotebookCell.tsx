@@ -1,5 +1,5 @@
 import { useShallow } from 'zustand/react/shallow';
-import React, { useMemo, useCallback } from 'react';
+import React, { useMemo, useCallback, useState, useEffect } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import {
@@ -7,10 +7,11 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Eraser,
   Loader2,
   Play,
-  Plus,
   Sparkles,
   Trash2,
 } from 'lucide-react';
@@ -19,6 +20,7 @@ import { useSaturnoStore } from '../store/useSaturnoStore';
 import { isThemeDark } from '../themes';
 import { CodeMirrorCellEditor } from './CodeMirrorCellEditor';
 import { InlineAIPopover } from './InlineAIPopover';
+import { notebookOutline } from '../utils/notebookOutline';
 import { CellOutputView } from './CellOutputView';
 
 interface Props {
@@ -38,7 +40,6 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
     toggleCellOutputCollapse,
     changeCellType,
     runCell,
-    addCellBelow,
     deleteCell,
     moveCell,
     clearCellOutputs,
@@ -55,7 +56,6 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
     toggleCellOutputCollapse: s.toggleCellOutputCollapse,
     changeCellType: s.changeCellType,
     runCell: s.runCell,
-    addCellBelow: s.addCellBelow,
     deleteCell: s.deleteCell,
     moveCell: s.moveCell,
     clearCellOutputs: s.clearCellOutputs,
@@ -69,6 +69,12 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
       'Corrija o erro desta célula mantendo o objetivo do código', errSummary);
   }, [cell.id, selectCell, openInlineAI]);
 
+  const [outputLimited, setOutputLimited] = useState(config?.output_display === 'limited');
+
+  useEffect(() => {
+    if (cell.isRunning) setOutputLimited(config?.output_display === 'limited');
+  }, [cell.isRunning, config?.output_display]);
+  const heading = notebookOutline([cell])[0];
   const isEditing = isActive && notebookMode === 'edit';
   const darkTheme = isThemeDark(config?.theme);
 
@@ -85,14 +91,61 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
       ? 'var(--sat-edit-bar)'
       : 'var(--sat-cmd-bar)';
 
+  const hasOutput =
+    cell.cell_type === 'code' && (cell.outputs.length > 0 || cell.isRunning);
+  const isShortEditor = cell.source.split('\n').length <= 3;
+
+  const outputControls = hasOutput ? (
+    <div
+      className={isShortEditor ? 'output-controls-inline' : 'output-controls'}
+      aria-label="Controles da saída"
+    >
+      <button
+        type="button"
+        aria-label={cell.outputCollapsed ? 'Mostrar saída' : 'Ocultar saída'}
+        title={cell.outputCollapsed ? 'Mostrar saída (O)' : 'Ocultar saída (O)'}
+        aria-expanded={!cell.outputCollapsed}
+        onClick={() => toggleCellOutputCollapse(cell.id)}
+        className="cell-action-btn"
+      >
+        {cell.outputCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+      </button>
+      {!cell.outputCollapsed && (
+        <button
+          type="button"
+          title={outputLimited ? 'Expandir saída inteira' : 'Limitar altura da saída'}
+          aria-label={outputLimited ? 'Expandir saída inteira' : 'Limitar altura da saída'}
+          aria-pressed={outputLimited}
+          onClick={() => setOutputLimited(!outputLimited)}
+          className="cell-action-btn"
+        >
+          {outputLimited ? <ChevronsUpDown size={13} /> : <ChevronsDownUp size={13} />}
+        </button>
+      )}
+      {cell.outputs.length > 0 && (
+        <button
+          type="button"
+          onClick={() => clearCellOutputs(cell.id)}
+          title="Limpar saída"
+          aria-label="Limpar saída"
+          className="cell-action-btn"
+        >
+          <Eraser size={13} />
+        </button>
+      )}
+    </div>
+  ) : null;
+
   return (
     <div
       data-cell-id={cell.id}
-      onClick={() => selectCell(cell.id, isActive ? notebookMode : 'command')}
-      className="group relative pl-3 py-1"
+      className={`notebook-cell-group group relative pl-2.5 py-0.5 ${
+        isActive ? 'is-active' : ''
+      } ${aiState?.isOpen ? 'is-ai-open' : ''}`}
     >
       {/* Sharp External Left Selection Rule */}
       <div
+        data-cell-surface
         onClick={(e) => {
           e.stopPropagation();
           selectCell(cell.id, 'command');
@@ -104,135 +157,42 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
               : 'Command Mode (Enter para editar)'
             : 'Selecionar célula'
         }
-        className={`absolute left-0 top-1 bottom-1 w-[3px] rounded-[1px] cursor-pointer transition-colors ${
+        className={`absolute left-0 top-1 bottom-1 w-[3px] rounded-[1px] cursor-pointer ${
           !isActive ? 'group-hover:bg-neutral-500/25' : ''
         }`}
         style={isActive ? { backgroundColor: externalBarColor } : undefined}
       />
 
-      {/* Top-right compact cell actions above card */}
-      <div
-        className={`${
-          isActive && !aiState?.isOpen
-            ? 'opacity-100'
-            : aiState?.isOpen
-              ? 'opacity-0 pointer-events-none'
-              : 'opacity-0 group-hover:opacity-100'
-        } transition-opacity flex items-center justify-end gap-0.5 pr-1 pb-0.5 select-none`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          type="button"
-          onClick={() => {
-            selectCell(cell.id, 'edit');
-            openInlineAI(cell.id, null);
-          }}
-          title="IA Inline (Ctrl+I ou Ctrl+K)"
-          className="px-1.5 py-0.5 rounded-[2px] text-[11.5px] font-medium flex items-center gap-1 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
-          style={{ color: 'var(--sat-text-secondary)' }}
-        >
-          <Sparkles size={12} style={{ color: 'var(--sat-accent)' }} />
-          <span className="font-mono">Ctrl+I</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() =>
-            changeCellType(cell.id, cell.cell_type === 'code' ? 'markdown' : 'code')
-          }
-          title="Alternar Code / Markdown (Ctrl+M)"
-          className="px-1.5 py-0.5 rounded-[2px] text-[11.5px] font-mono hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-          style={{
-            color:
-              cell.cell_type === 'code'
-                ? 'var(--sat-type-py)'
-                : 'var(--sat-type-md)',
-          }}
-        >
-          {cell.cell_type === 'code' ? 'py' : 'md'}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => moveCell(cell.id, 'up')}
-          title="Mover para cima (Alt+↑)"
-          className="p-1 rounded-[2px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-          style={{ color: 'var(--sat-text-muted)' }}
-        >
-          <ArrowUp size={13} />
-        </button>
-
-        <button
-          type="button"
-          onClick={() => moveCell(cell.id, 'down')}
-          title="Mover para baixo (Alt+↓)"
-          className="p-1 rounded-[2px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-          style={{ color: 'var(--sat-text-muted)' }}
-        >
-          <ArrowDown size={13} />
-        </button>
-
-        <button
-          type="button"
-          onClick={() => addCellBelow(cell.id, 'code')}
-          title="Inserir célula abaixo (B)"
-          className="p-1 rounded-[2px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-          style={{ color: 'var(--sat-text-muted)' }}
-        >
-          <Plus size={13} />
-        </button>
-
-        {cell.cell_type === 'code' && cell.outputs.length > 0 && (
-          <>
-            <button
-              type="button"
-              onClick={() => toggleCellOutputCollapse(cell.id)}
-              title={
-                cell.outputCollapsed
-                  ? 'Expandir saída (O)'
-                  : 'Recolher saída (O)'
-              }
-              className="p-1 rounded-[2px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-              style={{ color: 'var(--sat-text-muted)' }}
-            >
-              {cell.outputCollapsed ? (
-                <ChevronRight size={13} />
-              ) : (
-                <ChevronDown size={13} />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => clearCellOutputs(cell.id)}
-              title="Limpar saída"
-              className="p-1 rounded-[2px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-              style={{ color: 'var(--sat-text-muted)' }}
-            >
-              <Eraser size={13} />
-            </button>
-          </>
-        )}
-
-        <button
-          type="button"
-          onClick={() => deleteCell(cell.id)}
-          title="Excluir célula (Ctrl+Shift+Backspace ou D, D)"
-          className="p-1 rounded-[2px] hover:bg-red-500/15 text-red-400 cursor-pointer"
-        >
-          <Trash2 size={13} />
-        </button>
-      </div>
-
-      {/* Main Row: Gutter + Sharp Technical Cell Box */}
-      <div className="flex items-stretch gap-1.5">
+      {/* Main Row: Left Gutter + Sharp Technical Cell Box + Right External Actions */}
+      <div data-cell-surface className="flex items-start gap-1.5"
+        onClick={(e) => {
+          if ((e.target as HTMLElement).closest('.cm-editor, button, [data-cell-output-id]')) return;
+          selectCell(cell.id, 'command');
+        }}>
         <div
           onClick={(e) => {
             e.stopPropagation();
             selectCell(cell.id, 'command');
           }}
           title="Selecionar célula (Command Mode)"
-          className="w-12 shrink-0 pt-1.5 flex flex-col items-end pr-1 select-none cursor-pointer"
+          className="w-11 shrink-0 pt-1 flex flex-col items-end pr-0.5 select-none cursor-pointer"
         >
+          {heading && (
+            <button
+              type="button"
+              data-cell-surface
+              className="section-toggle"
+              aria-expanded={!cell.sectionCollapsed}
+              title={cell.sectionCollapsed ? 'Expandir seção' : 'Recolher seção'}
+              onClick={(e) => {
+                e.stopPropagation();
+                useSaturnoStore.getState().toggleSection(cell.id);
+              }}
+            >
+              {cell.sectionCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+              {cell.sectionCollapsed && <span>Seção recolhida</span>}
+            </button>
+          )}
           {cell.cell_type === 'code' && (
             <button
               type="button"
@@ -241,7 +201,7 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
                 runCell(cell.id, 'none');
               }}
               title="Executar célula (Shift+Enter)"
-              className="group/play h-6 px-1 rounded-[3px] flex items-center justify-center transition-colors hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+              className="group/play h-6 px-1 rounded-[3px] flex items-center justify-center hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] cursor-pointer"
               style={{
                 color: isActive ? 'var(--sat-text-secondary)' : 'var(--sat-text-muted)',
               }}
@@ -274,18 +234,19 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
                 setMarkdownRendered(cell.id, false);
                 selectCell(cell.id, 'edit');
               }}
-              className="jp-markdown-rendered px-3.5 py-1.5 rounded-[4px] border border-transparent hover:border-neutral-500/25 cursor-text transition-colors"
+              className="jp-markdown-rendered px-3 py-1.5 rounded-[4px] border border-transparent hover:border-neutral-500/25 cursor-text"
+              style={isActive ? { borderColor: externalBarColor } : undefined}
               dangerouslySetInnerHTML={{ __html: renderedMarkdownHtml }}
             />
           ) : (
             <div
-              className="rounded-[4px] border transition-colors overflow-hidden"
+              className="rounded-[4px] border"
               style={{
                 backgroundColor: isEditing
                   ? 'var(--sat-cell-active-bg)'
                   : 'var(--sat-cell-bg)',
-                borderColor: isEditing
-                  ? 'var(--sat-border-strong)'
+                borderColor: isActive
+                  ? externalBarColor
                   : 'var(--sat-border)',
               }}
             >
@@ -327,39 +288,95 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
                 onTriggerAI={(selection) => openInlineAI(cell.id, selection)}
               />
 
-              {cell.cell_type === 'code' &&
-                (cell.outputs.length > 0 || cell.isRunning) && (
-                  <div data-cell-output-id={cell.id}>
-                    {cell.outputCollapsed ? (
-                      <div
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleCellOutputCollapse(cell.id);
-                        }}
-                        className="px-3.5 py-1.5 border-t text-xs font-mono flex items-center gap-1.5 cursor-pointer hover:opacity-80"
-                        style={{
-                          backgroundColor: 'var(--sat-bg-canvas)',
-                          borderColor: 'var(--sat-border)',
-                          color: 'var(--sat-text-muted)',
-                        }}
-                      >
-                        <ChevronRight size={13} />
-                        <span>
-                          Saída recolhida ({cell.outputs.length} bloco
-                          {cell.outputs.length > 1 ? 's' : ''}) — clique ou pressione O
-                          para mostrar
-                        </span>
-                      </div>
-                    ) : (
-                      <CellOutputView
-                        outputs={cell.outputs}
-                        onFixErrorWithAI={fixErrorWithAI}
-                      />
-                    )}
-                  </div>
-                )}
+              {hasOutput && (
+                <div data-cell-output-id={cell.id} className="cell-output relative rounded-b-[3px]">
+                  {!isShortEditor && outputControls}
+                  {cell.outputCollapsed && (
+                    <button
+                      type="button"
+                      className="output-placeholder rounded-b-[3px]"
+                      onClick={() => toggleCellOutputCollapse(cell.id)}
+                      title="Mostrar saída"
+                    >
+                      •••
+                    </button>
+                  )}
+                  {!cell.outputCollapsed && (
+                    <div
+                      id={`output-${cell.id}`}
+                      className={`${outputLimited ? 'max-h-64 overflow-auto' : 'overflow-hidden'} rounded-b-[3px]`}
+                      tabIndex={outputLimited ? 0 : undefined}
+                      aria-label="Conteúdo da saída"
+                    >
+                      <CellOutputView outputs={cell.outputs} onFixErrorWithAI={fixErrorWithAI} />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
+        </div>
+
+        {/* Right External Stacked Actions (outside cell box) */}
+        <div
+          data-cell-surface
+          className="cell-right-rail relative w-7 self-stretch shrink-0 select-none"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="cell-actions">
+            <button
+              type="button"
+              onClick={() => {
+                selectCell(cell.id, 'edit');
+                openInlineAI(cell.id, null);
+              }}
+              title="IA Inline (Ctrl+I)"
+              aria-label="IA Inline (Ctrl+I)"
+              className="cell-action-btn"
+            >
+              <Sparkles size={13} style={{ color: 'var(--sat-accent)' }} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => moveCell(cell.id, 'up')}
+              title="Mover para cima (Alt+↑)"
+              aria-label="Mover para cima"
+              className="cell-action-btn"
+            >
+              <ArrowUp size={13} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => moveCell(cell.id, 'down')}
+              title="Mover para baixo (Alt+↓)"
+              aria-label="Mover para baixo"
+              className="cell-action-btn"
+            >
+              <ArrowDown size={13} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => deleteCell(cell.id)}
+              title="Excluir célula (D, D)"
+              aria-label="Excluir célula"
+              className="cell-action-btn is-danger"
+            >
+              <Trash2 size={13} />
+            </button>
+
+            {isShortEditor && hasOutput && (
+              <>
+                <div
+                  className="w-3.5 h-px my-0.5"
+                  style={{ backgroundColor: 'var(--sat-border)' }}
+                />
+                {outputControls}
+              </>
+            )}
+          </div>
         </div>
       </div>
 

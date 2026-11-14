@@ -59,7 +59,7 @@ export const CellOutputView: React.FC<Props> = React.memo(({ outputs, onFixError
                 <button
                   type="button"
                   onClick={() => onFixErrorWithAI(tbText)}
-                  className="h-6.5 px-2.5 rounded-[3px] border text-xs font-medium flex items-center gap-1.5 shrink-0 cursor-pointer"
+                  className="h-6.5 px-2.5 rounded-[3px] border text-xs font-medium flex items-center gap-1.5 shrink-0 hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
                   style={{
                     backgroundColor: 'var(--sat-bg-surface)',
                     borderColor: 'var(--sat-border)',

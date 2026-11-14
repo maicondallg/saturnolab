@@ -21,6 +21,7 @@ export interface NotebookCellData {
   isRunning?: boolean;
   markdownRendered?: boolean;
   outputCollapsed?: boolean;
+  sectionCollapsed?: boolean;
 }
 
 export interface KernelVariable {
@@ -54,6 +55,7 @@ export interface SaturnoConfig {
   theme: string;
   default_ai_apply_mode?: 'replace_cell' | 'append_cell';
   include_kernel_variables: boolean;
+  output_display?: 'expanded' | 'limited' | 'collapsed';
   notebook_layout?: 'centered' | 'expanded';
   sidebar_position?: 'left' | 'right';
   sidebar_width?: number;

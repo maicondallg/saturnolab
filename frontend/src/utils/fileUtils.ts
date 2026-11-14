@@ -125,33 +125,25 @@ export function getFileVisual(
   };
 }
 
-export function formatModifiedShort(iso: string): string {
-  if (!iso) return '';
+export function formatModifiedShort(iso: string, now = Date.now()): string {
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
+  if (!iso || Number.isNaN(date.getTime())) return '';
 
-  const now = new Date();
-  const isToday =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-
-  const hh = String(date.getHours()).padStart(2, '0');
-  const mm = String(date.getMinutes()).padStart(2, '0');
-
-  if (isToday) {
-    return `${hh}:${mm}`;
+  const elapsed = now - date.getTime();
+  if (elapsed >= -60_000 && elapsed < 60_000) return 'agora';
+  if (elapsed >= 60_000 && elapsed < 3_600_000) return `há ${Math.floor(elapsed / 60_000)} min`;
+  if (elapsed >= 3_600_000 && elapsed < 86_400_000) return `há ${Math.floor(elapsed / 3_600_000)} h`;
+  if (elapsed >= 86_400_000 && elapsed < 604_800_000) {
+    const days = Math.floor(elapsed / 86_400_000);
+    return days === 1 ? 'há 1 dia' : `há ${days} dias`;
   }
 
+  // Older (or future-dated) files use a short date; the tooltip retains exact time.
   const day = String(date.getDate()).padStart(2, '0');
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-
-  if (date.getFullYear() === now.getFullYear()) {
-    return `${day}/${month} ${hh}:${mm}`;
-  }
-
-  const yr = String(date.getFullYear()).slice(-2);
-  return `${day}/${month}/${yr}`;
+  const month = date.toLocaleString('pt-BR', { month: 'short' }).replace('.', '');
+  return date.getFullYear() === new Date(now).getFullYear()
+    ? `${day} ${month}`
+    : `${day}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getFullYear()).slice(-2)}`;
 }
 
 export function formatFileSize(bytes: number): string {

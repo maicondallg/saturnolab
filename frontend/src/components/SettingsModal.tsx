@@ -223,7 +223,7 @@ export const SettingsModal: React.FC = React.memo(() => {
           </div>
           <button
             onClick={closeSettings}
-            className="p-1 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+            className="sat-icon-btn p-1"
           >
             <X size={16} />
           </button>
@@ -564,6 +564,14 @@ export const SettingsModal: React.FC = React.memo(() => {
                     onChange={(e) => setAutoScrollOnRun(e.target.checked)}
                     className="w-4 h-4 mt-0.5 shrink-0 cursor-pointer"
                   />
+                </label>
+
+                <label className="p-3.5 rounded border flex items-center justify-between gap-4 text-sm" style={{ borderColor: 'var(--sat-border)' }}>
+                  <span>Exibição padrão das saídas<br /><small>Ao abrir um notebook ou executar uma célula.</small></span>
+                  <select value={config?.output_display || 'expanded'} onChange={e => void updateConfig({ output_display: e.target.value })}
+                    style={{ background: 'var(--sat-bg-surface)' }} className="border rounded p-2">
+                    <option value="expanded">Expandida</option><option value="limited">Altura limitada</option><option value="collapsed">Oculta</option>
+                  </select>
                 </label>
 
                 <label

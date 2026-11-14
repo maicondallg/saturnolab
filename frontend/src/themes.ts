@@ -1,4 +1,6 @@
 export type ThemeId =
+  | 'jupyter_dark'
+  | 'catppuccin'
   | 'graphite'
   | 'obsidian'
   | 'gruvbox'
@@ -15,6 +17,8 @@ export interface ThemeMeta {
 }
 
 export const SATURNO_THEMES: ThemeMeta[] = [
+  { id: 'jupyter_dark', label: 'JupyterLab Dark', isDark: true, bgPreview: '#212121', accentPreview: '#2196f3' },
+  { id: 'catppuccin', label: 'Catppuccin Mocha', isDark: true, bgPreview: '#1e1e2e', accentPreview: '#cba6f7' },
   {
     id: 'graphite',
     label: 'Graphite (Escuro Neutro)',

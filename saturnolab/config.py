@@ -13,6 +13,8 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 LEGACY_CONFIG_FILE = Path.home() / ".saturno" / "config.json"
 
 VALID_THEMES = {
+    "jupyter_dark",
+    "catppuccin",
     "graphite",
     "obsidian",
     "gruvbox",
@@ -41,6 +43,7 @@ class SaturnoConfig(BaseModel):
     sidebar_width: int = 280
     show_line_numbers: bool = True
     auto_scroll_on_run: bool = True
+    output_display: str = "expanded"
     show_modified_time: bool = True
     confirm_kernel_restart: bool = False
     editor_font_size: int = 14
@@ -155,6 +158,8 @@ class ConfigManager:
             self._config.sidebar_width = max(180, min(640, int(patch["sidebar_width"])))
         if "show_line_numbers" in patch:
             self._config.show_line_numbers = bool(patch["show_line_numbers"])
+        if patch.get("output_display") in ("expanded", "limited", "collapsed"):
+            self._config.output_display = patch["output_display"]
         if "auto_scroll_on_run" in patch:
             self._config.auto_scroll_on_run = bool(patch["auto_scroll_on_run"])
         if "show_modified_time" in patch:

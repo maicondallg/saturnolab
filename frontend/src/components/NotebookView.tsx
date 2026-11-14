@@ -1,18 +1,14 @@
 import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useRef } from 'react';
 import {
-  Eraser,
   FastForward,
-  Maximize2,
-  Minimize2,
   Plus,
-  RotateCw,
   Save,
-  Sparkles,
   Square,
 } from 'lucide-react';
 import { OpenNotebookTab } from '../types/notebook';
 import { useSaturnoStore } from '../store/useSaturnoStore';
+import { hiddenSectionCells } from '../utils/notebookOutline';
 import { NotebookCell } from './NotebookCell';
 
 interface Props {
@@ -24,7 +20,6 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   const {
     notebookMode,
     notebookLayout,
-    toggleNotebookLayout,
     scrollSignal,
     saveTabById,
     addCellAbove,
@@ -36,7 +31,6 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     undoDeleteCell,
     moveCell,
     changeCellType,
-    clearAllOutputs,
     selectCell,
     setMarkdownRendered,
     toggleCellOutputCollapse,
@@ -49,7 +43,6 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   } = useSaturnoStore(useShallow((s) => ({
     notebookMode: s.notebookMode,
     notebookLayout: s.notebookLayout,
-    toggleNotebookLayout: s.toggleNotebookLayout,
     scrollSignal: s.scrollSignal,
     saveTabById: s.saveTabById,
     addCellAbove: s.addCellAbove,
@@ -61,7 +54,6 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     undoDeleteCell: s.undoDeleteCell,
     moveCell: s.moveCell,
     changeCellType: s.changeCellType,
-    clearAllOutputs: s.clearAllOutputs,
     selectCell: s.selectCell,
     setMarkdownRendered: s.setMarkdownRendered,
     toggleCellOutputCollapse: s.toggleCellOutputCollapse,
@@ -76,7 +68,9 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lastChordRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
 
-  const activeCell = tab.cells.find((c) => c.id === tab.activeCellId) || tab.cells[0];
+  const hiddenCells = hiddenSectionCells(tab.cells);
+  const visibleCells = tab.cells.filter(c => !hiddenCells.has(c.id));
+  const activeCell = tab.cells.find((c) => c.id === tab.activeCellId);
 
   // Auto-scroll to cell or cell result when executed / navigated
   useEffect(() => {
@@ -136,14 +130,14 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
 
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target && target.closest('[data-modal-root="true"]')) return;
+      if (target && target.closest('[data-modal-root="true"], .workspace-sidebar, .activity-rail, [data-app-menu]')) return;
 
       const inInput =
         target &&
         (target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT' ||
-          target.closest('.cm-editor'));
+          target.closest('.cm-editor') || target.closest('[data-app-menu]') || target.tagName === 'BUTTON' || target.tagName === 'SUMMARY');
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
@@ -166,7 +160,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
 
       if (inInput || notebookMode !== 'command' || !activeCell) return;
 
-      const idx = tab.cells.findIndex((c) => c.id === activeCell.id);
+      const idx = visibleCells.findIndex((c) => c.id === activeCell.id);
       const lowerKey = e.key.toLowerCase();
       const now = Date.now();
 
@@ -231,10 +225,10 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
         moveCell(activeCell.id, 'down');
       } else if (e.key === 'ArrowUp' || lowerKey === 'k') {
         e.preventDefault();
-        if (idx > 0) selectCell(tab.cells[idx - 1].id, 'command', true);
+        if (idx > 0) selectCell(visibleCells[idx - 1].id, 'command', true);
       } else if (e.key === 'ArrowDown' || lowerKey === 'j') {
         e.preventDefault();
-        if (idx < tab.cells.length - 1) selectCell(tab.cells[idx + 1].id, 'command', true);
+        if (idx < visibleCells.length - 1) selectCell(visibleCells[idx + 1].id, 'command', true);
       } else if (lowerKey === 'a' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         addCellAbove(activeCell.id, 'code');
@@ -309,22 +303,6 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     interruptKernel,
   ]);
 
-  const statusColor =
-    tab.kernelStatus === 'busy'
-      ? 'var(--sat-orange)'
-      : tab.kernelStatus === 'idle'
-        ? 'var(--sat-green)'
-        : 'var(--sat-text-muted)';
-
-  const statusLabel =
-    tab.kernelStatus === 'busy'
-      ? 'Busy'
-      : tab.kernelStatus === 'starting'
-        ? 'Starting'
-        : tab.kernelStatus === 'idle'
-          ? 'Idle'
-          : 'Stopped';
-
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Sober Technical Notebook Toolbar */}
@@ -344,10 +322,10 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
           <button
             onClick={() => saveTabById(tab.id)}
             title="Salvar Notebook (Ctrl+S)"
-            className="h-7 px-2 rounded-[3px] text-xs flex items-center gap-1.5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+            className="h-7 px-2 rounded-[3px] text-xs flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer"
             style={{ color: 'var(--sat-text-secondary)' }}
           >
-            <Save size={13} />
+            <Save size={13} /><span>Salvar</span>
           </button>
 
           <div
@@ -360,7 +338,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
               const id = addCellBelow(activeCell?.id, 'code');
               if (id) selectCell(id, 'edit');
             }}
-            className="h-7 px-2 rounded-[3px] text-xs font-medium flex items-center gap-1 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+            className="h-7 px-2 rounded-[3px] text-xs font-medium flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
           >
             <Plus size={13} />
             <span>Code</span>
@@ -371,7 +349,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
               const id = addCellBelow(activeCell?.id, 'markdown');
               if (id) selectCell(id, 'edit');
             }}
-            className="h-7 px-2 rounded-[3px] text-xs font-medium flex items-center gap-1 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+            className="h-7 px-2 rounded-[3px] text-xs font-medium flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer"
             style={{ color: 'var(--sat-text-secondary)' }}
           >
             <Plus size={13} />
@@ -386,7 +364,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
           <button
             onClick={() => runAllCells()}
             title="Executar todas as células"
-            className="h-7 px-2.5 rounded-[3px] text-xs font-medium flex items-center gap-1.5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+            className="h-7 px-2.5 rounded-[3px] text-xs font-medium flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
           >
             <FastForward size={13} />
             <span className="hidden md:inline">Run All</span>
@@ -403,109 +381,32 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
             </button>
           )}
 
-          <button
-            onClick={() => restartKernel(false)}
-            title="Reiniciar Kernel (atalho: 0, 0 no modo comando)"
-            className="h-7 px-2 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
-            style={{ color: 'var(--sat-text-secondary)' }}
-          >
-            <RotateCw size={13} />
-          </button>
-
-          <button
-            onClick={() => clearAllOutputs()}
-            title="Limpar todas as saídas"
-            className="h-7 px-2 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
-            style={{ color: 'var(--sat-text-secondary)' }}
-          >
-            <Eraser size={13} />
-          </button>
-
-          <div
-            className="h-4 w-px mx-1"
-            style={{ backgroundColor: 'var(--sat-border)' }}
-          />
-
-          <button
-            onClick={() => {
-              if (activeCell) {
-                selectCell(activeCell.id, 'edit');
-                openInlineAI(activeCell.id, null);
-              }
-            }}
-            title="Abrir IA Inline na célula ativa (Ctrl+I ou Ctrl+K)"
-            className="h-7 px-2.5 rounded-[3px] border text-xs font-medium flex items-center gap-1.5 hover:opacity-90 transition-opacity cursor-pointer"
-            style={{
-              backgroundColor: 'var(--sat-bg-subtle)',
-              borderColor: 'var(--sat-border)',
-              color: 'var(--sat-text-primary)',
-            }}
-          >
-            <Sparkles size={12} style={{ color: 'var(--sat-accent)' }} />
-            <span>IA Inline</span>
-            <kbd
-              className="text-[10.5px] font-mono opacity-70 ml-0.5 hidden sm:inline"
-              style={{ color: 'var(--sat-text-muted)' }}
-            >
-              Ctrl+I
-            </kbd>
-          </button>
-        </div>
-
-        {/* Right: Layout Mode Toggle (Centered / Expanded) + Clean Technical Kernel Status */}
-        <div
-          className="flex items-center gap-2 text-xs font-mono shrink-0"
-          style={{ color: 'var(--sat-text-secondary)' }}
-        >
-          <button
-            onClick={toggleNotebookLayout}
-            title={
-              notebookLayout === 'centered'
-                ? 'Modo atual: Centralizado (clique para Expandir largura total)'
-                : 'Modo atual: Expandido (clique para Centralizar)'
-            }
-            className="h-7 px-2 rounded-[3px] border text-[11px] font-sans font-medium flex items-center gap-1.5 hover:opacity-90 cursor-pointer"
-            style={{
-              backgroundColor: 'var(--sat-bg-subtle)',
-              borderColor: 'var(--sat-border)',
-              color: 'var(--sat-text-secondary)',
-            }}
-          >
-            {notebookLayout === 'centered' ? (
-              <>
-                <Maximize2 size={12} />
-                <span className="hidden lg:inline">Centralizado</span>
-              </>
-            ) : (
-              <>
-                <Minimize2 size={12} style={{ color: 'var(--sat-accent)' }} />
-                <span className="hidden lg:inline">Expandido</span>
-              </>
-            )}
-          </button>
-
-          <span className="hidden xl:inline opacity-80">Python 3 (ipykernel)</span>
-          <span className="hidden sm:inline opacity-35">|</span>
-          <span
-            className="w-2 h-2 rounded-full inline-block"
-            style={{ backgroundColor: statusColor }}
-          />
-          <span>{statusLabel}</span>
         </div>
       </div>
 
       {/* Scrollable Cells Canvas */}
       <div
+        data-notebook-scroll
         ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto px-4 md:px-6 py-5"
+        onMouseDownCapture={(e) => {
+          const target = e.target as HTMLElement;
+          if (target.closest('[data-cell-surface], button, input, textarea, select')) return;
+          // Stop CodeMirror's document mouse handler from projecting margin clicks
+          // back into a line of the previously focused editor.
+          e.preventDefault();
+          e.stopPropagation();
+          if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+          selectCell('', 'command');
+        }}
+        className="flex-1 overflow-y-auto px-3 md:px-5 py-3"
         style={{ backgroundColor: 'var(--sat-bg-canvas)' }}
       >
         <div
-          className={`${
-            notebookLayout === 'expanded' ? 'w-full max-w-none' : 'max-w-5xl mx-auto'
-          } pb-28 space-y-1.5 transition-all`}
+          className={`notebook-cells-list ${
+            notebookLayout === 'expanded' ? 'w-full max-w-none' : 'max-w-6xl mx-auto'
+          } pb-28 space-y-2.5`}
         >
-          {tab.cells.map((cell) => (
+          {visibleCells.map((cell) => (
             <NotebookCell
               key={cell.id}
               cell={cell}
@@ -521,7 +422,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
                 const created = addCellBelow(lastId, 'code');
                 if (created) selectCell(created, 'edit');
               }}
-              className="h-7 px-3 rounded-[3px] border text-xs font-medium flex items-center gap-1 cursor-pointer"
+              className="h-7 px-3 rounded-[3px] border text-xs font-medium flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
               style={{
                 backgroundColor: 'var(--sat-bg-surface)',
                 borderColor: 'var(--sat-border)',
@@ -536,7 +437,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
                 const created = addCellBelow(lastId, 'markdown');
                 if (created) selectCell(created, 'edit');
               }}
-              className="h-7 px-3 rounded-[3px] border text-xs font-medium flex items-center gap-1 cursor-pointer"
+              className="h-7 px-3 rounded-[3px] border text-xs font-medium flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer"
               style={{
                 backgroundColor: 'var(--sat-bg-surface)',
                 borderColor: 'var(--sat-border)',

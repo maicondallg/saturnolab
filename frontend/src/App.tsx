@@ -2,6 +2,7 @@ import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { Columns2, Plus, Rocket, X } from 'lucide-react';
 import { useSaturnoStore } from './store/useSaturnoStore';
+import { StatusBar } from './components/StatusBar';
 import { MenuBar } from './components/MenuBar';
 import { LeftSidebar } from './components/LeftSidebar';
 import { LauncherView } from './components/LauncherView';
@@ -145,19 +146,21 @@ export const App: React.FC = () => {
       }
     }
 
+    const entriesRaw = e.dataTransfer.getData('application/x-saturno-entries');
     const entryRaw = e.dataTransfer.getData('application/x-saturno-entry');
-    if (entryRaw) {
+    if (entriesRaw || entryRaw) {
       try {
-        const entry: FileEntry = JSON.parse(entryRaw);
-        if (entry.type !== 'directory') {
-          if (zone === 'left' || zone === 'right') {
-            await openEntry(entry, { sideBySide: true, targetPaneId });
-          } else {
-            await openEntry(entry, { sideBySide: false, targetPaneId });
+        const entries: FileEntry[] = entriesRaw ? JSON.parse(entriesRaw) : [JSON.parse(entryRaw)];
+        let destination = targetPaneId;
+        for (const entry of entries.filter(entry => entry.type !== 'directory')) {
+          await openEntry(entry, { targetPaneId: destination });
+          if (zone !== 'center' && destination === targetPaneId) {
+            splitTab(entry.path, targetPaneId, zone);
+            destination = useSaturnoStore.getState().activePaneId;
           }
         }
-      } catch {
-        // ignore
+      } catch (error) {
+        useSaturnoStore.setState({statusMessage: `Não foi possível abrir: ${String(error)}`});
       }
     }
   };
@@ -330,7 +333,7 @@ export const App: React.FC = () => {
                                   splitTab(tab.id, pane.id, 'right');
                                 }}
                                 title="Abrir aba lado a lado (Split View)"
-                                className="opacity-0 group-hover/tab:opacity-80 hover:!opacity-100 p-0.5 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer transition-opacity"
+                                className="opacity-0 group-hover/tab:opacity-80 hover:!opacity-100 p-0.5 rounded-[2px] hover:bg-[var(--sat-bg-hover)] cursor-pointer transition-opacity"
                               >
                                 <Columns2 size={12} />
                               </button>
@@ -341,7 +344,7 @@ export const App: React.FC = () => {
                                   requestCloseTab();
                                 }}
                                 title="Fechar aba (ou clique com botão do meio)"
-                                className="p-0.5 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+                                className="p-0.5 rounded-[2px] hover:bg-[var(--sat-bg-hover)] cursor-pointer transition-colors"
                               >
                                 {isDirty ? (
                                   <span
@@ -363,7 +366,7 @@ export const App: React.FC = () => {
                           openLauncher(pane.id);
                         }}
                         title="Abrir Launcher"
-                        className="px-2.5 flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer shrink-0"
+                        className="px-2.5 flex items-center justify-center hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer shrink-0"
                         style={{ color: 'var(--sat-text-muted)' }}
                       >
                         <Plus size={15} />
@@ -375,23 +378,11 @@ export const App: React.FC = () => {
                       className="flex items-center px-1.5 gap-0.5 border-l shrink-0"
                       style={{ borderColor: 'var(--sat-border)' }}
                     >
-                      {activeTab && (
-                        <button
-                          onClick={() => splitTab(activeTab.id, pane.id, 'right')}
-                          title="Dividir aba ativa lado a lado ( tal como no JupyterLab )"
-                          className="h-6 px-1.5 rounded-[2px] flex items-center gap-1 text-[11px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
-                          style={{ color: 'var(--sat-text-secondary)' }}
-                        >
-                          <Columns2 size={13} />
-                          <span className="hidden xl:inline">Dividir</span>
-                        </button>
-                      )}
-
                       {panes.length > 1 && (
                         <button
                           onClick={() => closePane(pane.id)}
                           title="Fechar este painel dividido (mantendo abas abertas)"
-                          className="h-6 w-6 rounded-[2px] flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
+                          className="h-6 w-6 rounded-[2px] flex items-center justify-center hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer"
                           style={{ color: 'var(--sat-text-muted)' }}
                         >
                           <X size={13} />
@@ -469,6 +460,8 @@ export const App: React.FC = () => {
 
         {sidebarPosition === 'right' && <LeftSidebar />}
       </div>
+
+      <StatusBar />
 
       <Suspense fallback={null}>
         {showFolderModal && <FolderPickerModal />}

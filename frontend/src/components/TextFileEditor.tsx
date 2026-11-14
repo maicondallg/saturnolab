@@ -32,6 +32,9 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
           borderColor: 'var(--sat-border)',
         }}
       >
+        <button onClick={() => saveTabById(tab.id)} title="Salvar (Ctrl+S)"
+          className="h-7 px-2 rounded-[3px] text-xs flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer"
+          style={{ color: 'var(--sat-text-secondary)' }}><Save size={13} /><span>Salvar</span></button>
         <div className="flex items-center gap-2 min-w-0">
           <FileTypeIcon name={tab.name} type="file" size={14} />
           <span
@@ -53,17 +56,7 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
           )}
         </div>
 
-        <button
-          onClick={() => saveTabById(tab.id)}
-          className="h-7 px-3 rounded-[3px] text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:opacity-90 transition-opacity"
-          style={{
-            backgroundColor: 'var(--sat-btn-primary-bg)',
-            color: 'var(--sat-btn-primary-text)',
-          }}
-        >
-          <Save size={13} />
-          <span>Salvar (Ctrl+S)</span>
-        </button>
+
       </div>
 
       <div

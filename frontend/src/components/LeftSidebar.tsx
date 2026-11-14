@@ -1,779 +1,222 @@
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
-import React, { useMemo, useRef, useState } from 'react';
-import {
-  CheckSquare,
-  ChevronDown,
-  ChevronRight,
-  ChevronsDownUp,
-  Columns2,
-  Database,
-  Folder,
-  FolderInput,
-  FolderPlus,
-  PanelLeft,
-  PanelRight,
-  Pencil,
-  RefreshCw,
-  Square,
-  Trash2,
-  X,
-} from 'lucide-react';
+import { ChevronDown, ChevronRight, ChevronsDownUp, Folder, ListTree, Database, PanelLeftClose, Plus, RefreshCw, X } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
-import { FileEntry, OpenNotebookTab } from '../types/notebook';
-import {
-  collectAllFolders,
-  flattenVisibleTree,
-  formatModifiedShort,
-  formatModifiedTooltip,
-} from '../utils/fileUtils';
+import { apiFetch } from '../services/api';
+import { FileEntry } from '../types/notebook';
+import { flattenVisibleTree, formatModifiedShort, formatModifiedTooltip } from '../utils/fileUtils';
+import { notebookOutline } from '../utils/notebookOutline';
 import { FileTypeIcon } from './FileTypeIcon';
 
+let fileClipboard: string[] = [];
+let clipboardCut = false;
+const parentOf = (path: string) => path.split('/').slice(0, -1).join('/');
 export const LeftSidebar: React.FC = React.memo(() => {
-  const {
-    leftSidebar,
-    setLeftSidebar,
-    sidebarPosition,
-    toggleSidebarPosition,
-    sidebarWidth,
-    setSidebarWidth,
-    showModifiedTime,
-    files,
-    expandedFolders,
-    folderChildren,
-    toggleFolderExpanded,
-    collapseAllFolders,
-    activeFolderContext,
-    setActiveFolderContext,
-    selectedFilePaths,
-    toggleFileSelection,
-    selectFileRange,
-    selectAllFiles,
-    clearFileSelection,
-    refreshFiles,
-    openEntry,
-    createNewFolder,
-    renameEntry,
-    deleteEntry,
-    deleteBatchEntries,
-    moveEntries,
-    activeVariables,
-    activeTabId,
-  } = useSaturnoStore(useShallow((s) => ({
-    leftSidebar: s.leftSidebar,
-    setLeftSidebar: s.setLeftSidebar,
-    sidebarPosition: s.sidebarPosition,
-    toggleSidebarPosition: s.toggleSidebarPosition,
-    sidebarWidth: s.sidebarWidth,
-    setSidebarWidth: s.setSidebarWidth,
-    showModifiedTime: s.showModifiedTime,
-    files: s.files,
-    expandedFolders: s.expandedFolders,
-    folderChildren: s.folderChildren,
-    toggleFolderExpanded: s.toggleFolderExpanded,
-    collapseAllFolders: s.collapseAllFolders,
-    activeFolderContext: s.activeFolderContext,
-    setActiveFolderContext: s.setActiveFolderContext,
-    selectedFilePaths: s.selectedFilePaths,
-    toggleFileSelection: s.toggleFileSelection,
-    selectFileRange: s.selectFileRange,
-    selectAllFiles: s.selectAllFiles,
-    clearFileSelection: s.clearFileSelection,
-    refreshFiles: s.refreshFiles,
-    openEntry: s.openEntry,
-    createNewFolder: s.createNewFolder,
-    renameEntry: s.renameEntry,
-    deleteEntry: s.deleteEntry,
-    deleteBatchEntries: s.deleteBatchEntries,
-    moveEntries: s.moveEntries,
-    activeTabId: s.activeTabId,
-    activeVariables: s.tabs.find(
-      (t): t is OpenNotebookTab => t.id === s.activeTabId && t.kind === 'notebook'
-    )?.variables,
+  const s = useSaturnoStore(useShallow(s => ({
+    panel: s.leftSidebar, position: s.sidebarPosition, width: s.sidebarWidth,
+    files: s.files, expanded: s.expandedFolders, children: s.folderChildren,
+    selected: s.selectedFilePaths, folder: s.activeFolderContext, showTime: s.showModifiedTime,
+    tab: s.tabs.find(t => t.id === s.activeTabId),
   })));
-
-  const [createMode, setCreateMode] = useState<'folder' | null>(null);
-  const [newItemName, setNewItemName] = useState('');
-  const [renamingPath, setRenamingPath] = useState<string | null>(null);
-  const [renameVal, setRenameVal] = useState('');
-  const [showMoveMenu, setShowMoveMenu] = useState(false);
-  const [moveTargetFolder, setMoveTargetFolder] = useState('');
-  const [isResizing, setIsResizing] = useState(false);
-
-  const sidebarRef = useRef<HTMLElement>(null);
-
-  const visibleNodes = useMemo(
-    () => flattenVisibleTree(files, expandedFolders, folderChildren),
-    [files, expandedFolders, folderChildren]
-  );
-
-  const visiblePaths = useMemo(
-    () => visibleNodes.map((n) => n.entry.path),
-    [visibleNodes]
-  );
-
-  const availableDestinationFolders = useMemo(
-    () => collectAllFolders(files, folderChildren, new Set(selectedFilePaths)),
-    [files, folderChildren, selectedFilePaths]
-  );
-
-  if (!leftSidebar) return null;
-
-
-  const hasSelection = selectedFilePaths.length > 0;
-
-  const startResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsResizing(true);
-    const startX = e.clientX;
-    const startWidth = sidebarWidth;
-
-    const onMouseMove = (moveEvt: MouseEvent) => {
-      const delta =
-        sidebarPosition === 'left'
-          ? moveEvt.clientX - startX
-          : startX - moveEvt.clientX;
-      setSidebarWidth(startWidth + delta, false);
-    };
-
-    const onMouseUp = (upEvt: MouseEvent) => {
-      const delta =
-        sidebarPosition === 'left'
-          ? upEvt.clientX - startX
-          : startX - upEvt.clientX;
-      setSidebarWidth(startWidth + delta, true);
-      setIsResizing(false);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
+  const a = useSaturnoStore.getState();
+  const nodes = useMemo(() => flattenVisibleTree(s.files, s.expanded, s.children), [s.files, s.expanded, s.children]);
+  const paths = nodes.map(n => n.entry.path);
+  const notebook = s.tab?.kind === 'notebook' ? s.tab : undefined;
+  const headings = useMemo(() => notebookOutline(notebook?.cells || []), [notebook?.cells]);
+  const [context, setContext] = useState<{ x: number; y: number; entry?: FileEntry } | null>(null);
+  const [naming, setNaming] = useState<{ kind: string; folder: string; entry?: FileEntry } | null>(null);
+  const [name, setName] = useState('');
+  const [error, setError] = useState('');
+  const [modifiedNow, setModifiedNow] = useState(Date.now);
+  useEffect(() => {
+    if (s.panel !== 'files' || !s.showTime) return;
+    setModifiedNow(Date.now());
+    const timer = window.setInterval(() => setModifiedNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [s.panel, s.showTime]);
+  const [dropFolder, setDropFolder] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const close = (e: PointerEvent) => { if (!menuRef.current?.contains(e.target as Node)) setContext(null); };
+    const escape = (e: KeyboardEvent) => { if (e.key === 'Escape') { setContext(null); setNaming(null); } };
+    document.addEventListener('pointerdown', close); document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', escape); };
+  }, []);
+  useLayoutEffect(() => {
+    if (!context || !menuRef.current) return;
+    const { width, height } = menuRef.current.getBoundingClientRect();
+    const left = context.x + width > window.innerWidth - 8 ? Math.max(8, context.x - width) : Math.max(8, context.x);
+    const top = context.y + height > window.innerHeight - 8 ? Math.max(8, context.y - height) : Math.max(8, context.y);
+    menuRef.current.style.left = `${left}px`;
+    menuRef.current.style.top = `${top}px`;
+  }, [context]);
+  const perform = async (fn: () => unknown) => {
+    setContext(null); setError('');
+    try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   };
-
-  const handleRowClick = (e: React.MouseEvent, entry: FileEntry) => {
-    if (renamingPath === entry.path) return;
-
-    if (e.shiftKey) {
-      e.preventDefault();
-      selectFileRange(visiblePaths, entry.path);
-      return;
-    }
-
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      toggleFileSelection(entry.path, false);
-      return;
-    }
-
-    if (entry.type === 'directory') {
-      setActiveFolderContext(entry.path);
-      toggleFolderExpanded(entry.path);
-    } else {
-      const parentParts = entry.path.split('/');
-      parentParts.pop();
-      setActiveFolderContext(parentParts.join('/'));
-      openEntry(entry);
-    }
+  const copyTo = async (selected: string[], folder: string) => {
+    await apiFetch('/api/fs/copy', { method: 'POST', body: JSON.stringify({ paths: selected, target_folder: folder }) });
+    await a.refreshFiles();
+    useSaturnoStore.setState({ statusMessage: `${selected.length} item(ns) copiado(s)` });
   };
-
-  return (
-    <aside
-      ref={sidebarRef}
-      style={{
-        width: `${sidebarWidth}px`,
-        backgroundColor: 'var(--sat-bg-surface)',
-        borderColor: 'var(--sat-border)',
-      }}
-      className={`relative max-md:absolute max-md:inset-y-0 max-md:z-20 max-md:max-w-[calc(100%-48px)] flex flex-col h-full shrink-0 select-none overflow-hidden ${
-        sidebarPosition === 'left' ? 'border-r max-md:left-0' : 'border-l max-md:right-0'
-      }`}
-    >
-      {/* Flush Header Tabs: Arquivos | Variáveis + Position Toggle */}
-      <div
-        className="h-9 flex items-stretch border-b shrink-0"
-        style={{ borderColor: 'var(--sat-border)' }}
-      >
-        <button
-          onClick={() => setLeftSidebar('files')}
-          className="flex-1 px-2.5 text-xs font-medium uppercase tracking-wider flex items-center justify-center gap-1.5 border-r cursor-pointer transition-colors"
-          style={{
-            borderColor: 'var(--sat-border)',
-            backgroundColor:
-              leftSidebar === 'files' ? 'var(--sat-bg-surface)' : 'var(--sat-bg-subtle)',
-            color:
-              leftSidebar === 'files'
-                ? 'var(--sat-text-primary)'
-                : 'var(--sat-text-muted)',
-            borderBottom:
-              leftSidebar === 'files'
-                ? '2px solid var(--sat-accent)'
-                : '2px solid transparent',
-          }}
-        >
-          <Folder size={13} />
-          <span>Arquivos</span>
-        </button>
-
-        <button
-          onClick={() => setLeftSidebar('variables')}
-          className="flex-1 px-2.5 text-xs font-medium uppercase tracking-wider flex items-center justify-center gap-1.5 border-r cursor-pointer transition-colors"
-          style={{
-            borderColor: 'var(--sat-border)',
-            backgroundColor:
-              leftSidebar === 'variables'
-                ? 'var(--sat-bg-surface)'
-                : 'var(--sat-bg-subtle)',
-            color:
-              leftSidebar === 'variables'
-                ? 'var(--sat-text-primary)'
-                : 'var(--sat-text-muted)',
-            borderBottom:
-              leftSidebar === 'variables'
-                ? '2px solid var(--sat-accent)'
-                : '2px solid transparent',
-          }}
-        >
-          <Database size={13} />
-          <span>Variáveis</span>
-          {activeVariables && activeVariables.length > 0 && (
-            <span
-              className="text-[10.5px] px-1.5 rounded-[2px] font-mono"
-              style={{
-                backgroundColor: 'var(--sat-bg-hover)',
-                color: 'var(--sat-text-primary)',
-              }}
-            >
-              {activeVariables.length}
-            </span>
-          )}
-        </button>
-
-        <button
-          onClick={toggleSidebarPosition}
-          title={
-            sidebarPosition === 'left'
-              ? 'Mover barra lateral para a direita'
-              : 'Mover barra lateral para a esquerda'
-          }
-          className="px-2 flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors shrink-0"
-          style={{
-            backgroundColor: 'var(--sat-bg-subtle)',
-            color: 'var(--sat-text-secondary)',
-          }}
-        >
-          {sidebarPosition === 'left' ? <PanelRight size={14} /> : <PanelLeft size={14} />}
-        </button>
+  const pasteTo = async (folder: string) => {
+    if (clipboardCut) { await a.moveEntries(fileClipboard, folder); fileClipboard = []; clipboardCut = false; }
+    else await copyTo(fileClipboard, folder);
+  };
+  const startNaming = (kind: string, entry?: FileEntry) => {
+    const folder = context?.entry ? (context.entry.type === 'directory' ? context.entry.path : parentOf(context.entry.path)) : s.folder;
+    setNaming({ kind, folder, entry }); setName(entry?.name || ({ python: 'script.py', markdown: 'notas.md', file: 'arquivo.txt', notebook: 'Untitled.ipynb', folder: '' }[kind] || '')); setContext(null);
+  };
+  const remove = () => perform(async () => { if (s.selected.length && window.confirm(`Excluir ${s.selected.length} item(ns)?`)) await a.deleteBatchEntries(s.selected); });
+  const drop = (e: React.DragEvent, folder: string) => {
+    if (!e.dataTransfer.types.includes('application/x-saturno-paths')) return;
+    e.preventDefault(); e.stopPropagation(); setDropFolder(null);
+    void perform(async () => {
+      const selected: string[] = JSON.parse(e.dataTransfer.getData('application/x-saturno-paths'));
+      const roots = selected.filter(p => !selected.some(other => other !== p && p.startsWith(other + '/')));
+      await a.moveEntries(roots, folder);
+    });
+  };
+  const navigate = (cellId: string, ordinal: number) => {
+    if (!notebook) return;
+    // Reveal parent sections before navigating to a hidden heading.
+    useSaturnoStore.setState(state => ({ tabs: state.tabs.map(t => t.id === notebook.id && t.kind === 'notebook' ? { ...t, cells: t.cells.map((c, index) => { const h = headings.find(h => h.cellId === c.id); const target = headings.find(h => h.cellId === cellId); const end = h ? headings.find(next => next.index > index && next.level <= h.level)?.index ?? t.cells.length : index; return h && target && index <= target.index && target.index < end ? { ...c, sectionCollapsed: false } : c; }) } : t) }));
+    a.selectCell(cellId, 'command', true);
+    requestAnimationFrame(() => {
+      const cell = Array.from(document.querySelectorAll('[data-cell-id]')).find(el => el.getAttribute('data-cell-id') === cellId);
+      cell?.querySelectorAll('.jp-markdown-rendered h1, .jp-markdown-rendered h2, .jp-markdown-rendered h3, .jp-markdown-rendered h4, .jp-markdown-rendered h5, .jp-markdown-rendered h6')[ordinal]?.scrollIntoView({ block: 'nearest' });
+    });
+  };
+  const menuItem = (label: string, fn: () => unknown, disabled = false) => <button key={label} className="app-menu-item" disabled={disabled} onClick={() => void perform(fn)}>{label}</button>;
+  return <>
+    <nav aria-label="Painéis de trabalho" className="activity-rail">
+      {([{ id: 'files', title: 'Arquivos', icon: Folder }, { id: 'variables', title: 'Variáveis', icon: Database }, { id: 'outline', title: 'Sumário do notebook', icon: ListTree }] as const).map(({ id, title, icon: Icon }) =>
+        <button key={id} title={title} aria-label={title} aria-pressed={s.panel === id} onClick={() => a.setLeftSidebar(id)} className={s.panel === id ? 'is-active' : ''}><Icon size={19} /></button>)}
+    </nav>
+    {s.panel && <aside className={`workspace-sidebar ${s.position === 'right' ? 'sidebar-right' : ''}`} style={{ width: s.width, background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }}>
+      <div className="h-9 px-3 flex items-center justify-between border-b shrink-0" style={{ borderColor: 'var(--sat-border)' }}>
+        <span className="text-sm font-medium">{s.panel === 'files' ? 'Arquivos' : s.panel === 'outline' ? 'Sumário' : 'Variáveis'}</span>
+        <button className="sat-icon-btn" title="Ocultar painel (Ctrl+B)" aria-label="Ocultar painel" onClick={() => a.setLeftSidebar(null)}><PanelLeftClose size={16} /></button>
       </div>
-
-      {/* 1. ARQUIVOS (Tree Explorer) */}
-      {leftSidebar === 'files' && (
-        <>
-          {/* Compact Header / Action Toolbar (without + Notebook / .py buttons) */}
-          <div
-            className="h-8 px-2.5 flex items-center justify-between border-b gap-1 shrink-0"
-            style={{ borderColor: 'var(--sat-border-subtle)' }}
-          >
-            <div className="flex items-center gap-1.5 min-w-0 text-[11px] font-mono truncate">
-              {activeFolderContext ? (
-                <>
-                  <span
-                    className="truncate"
-                    style={{ color: 'var(--sat-text-secondary)' }}
-                    title={`Pasta ativa: /${activeFolderContext}`}
-                  >
-                    /{activeFolderContext}
-                  </span>
-                  <button
-                    onClick={() => setActiveFolderContext('')}
-                    title="Voltar contexto para a raiz /"
-                    className="p-0.5 rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0"
-                    style={{ color: 'var(--sat-text-muted)' }}
-                  >
-                    <X size={11} />
-                  </button>
-                </>
-              ) : (
-                <span
-                  className="uppercase tracking-wider text-[10.5px] font-sans font-medium"
-                  style={{ color: 'var(--sat-text-muted)' }}
-                >
-                  Workspace
-                </span>
-              )}
-            </div>
-
-            <div className="flex items-center gap-0.5 shrink-0">
-              <button
-                onClick={() => {
-                  setCreateMode((m) => (m === 'folder' ? null : 'folder'));
-                  setNewItemName('');
-                }}
-                title="Nova Pasta"
-                className="p-1 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-                style={{ color: 'var(--sat-text-secondary)' }}
-              >
-                <FolderPlus size={14} />
-              </button>
-              <button
-                onClick={collapseAllFolders}
-                title="Recolher todas as pastas"
-                className="p-1 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-                style={{ color: 'var(--sat-text-secondary)' }}
-              >
-                <ChevronsDownUp size={13} />
-              </button>
-              <button
-                onClick={() => refreshFiles()}
-                title="Atualizar árvore de arquivos"
-                className="p-1 rounded-[3px] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-                style={{ color: 'var(--sat-text-secondary)' }}
-              >
-                <RefreshCw size={13} />
-              </button>
-            </div>
-          </div>
-
-          {/* Create Folder Inline Input */}
-          {createMode && (
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                const clean = newItemName.trim();
-                if (!clean) return;
-                await createNewFolder(clean, activeFolderContext);
-                setNewItemName('');
-                setCreateMode(null);
-              }}
-              className="p-2 border-b space-y-1.5"
-              style={{
-                backgroundColor: 'var(--sat-bg-subtle)',
-                borderColor: 'var(--sat-border)',
-              }}
-            >
-              <div className="text-[11px] font-medium flex items-center justify-between">
-                <span style={{ color: 'var(--sat-text-secondary)' }}>
-                  Nova pasta {activeFolderContext ? `em /${activeFolderContext}` : 'na raiz /'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setCreateMode(null)}
-                  className="opacity-70 hover:opacity-100 cursor-pointer"
-                >
-                  <X size={12} />
-                </button>
-              </div>
-              <div className="flex gap-1.5">
-                <input
-                  autoFocus
-                  value={newItemName}
-                  onChange={(e) => setNewItemName(e.target.value)}
-                  placeholder="Nome da pasta..."
-                  className="flex-1 px-2 py-1 text-xs rounded-[3px] border bg-transparent font-mono focus:outline-none"
-                  style={{ borderColor: 'var(--sat-border)' }}
-                />
-                <button
-                  type="submit"
-                  className="px-2.5 py-1 text-xs rounded-[3px] font-medium cursor-pointer"
-                  style={{
-                    backgroundColor: 'var(--sat-btn-primary-bg)',
-                    color: 'var(--sat-btn-primary-text)',
-                  }}
-                >
-                  Criar
-                </button>
-              </div>
-            </form>
-          )}
-
-          {/* Multi-Select Batch Action Bar */}
-          {hasSelection && (
-            <div
-              className="px-2.5 py-1.5 border-b space-y-1.5"
-              style={{
-                backgroundColor: 'var(--sat-bg-subtle)',
-                borderColor: 'var(--sat-border)',
-              }}
-            >
-              <div className="flex items-center justify-between gap-1 text-xs">
-                <div className="flex items-center gap-1.5 font-medium">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (selectedFilePaths.length === visiblePaths.length) {
-                        clearFileSelection();
-                      } else {
-                        selectAllFiles(visiblePaths);
-                      }
-                    }}
-                    title="Selecionar todos / limpar"
-                    className="cursor-pointer flex items-center"
-                    style={{ color: 'var(--sat-accent)' }}
-                  >
-                    <CheckSquare size={13} />
-                  </button>
-                  <span>{selectedFilePaths.length} selecionado(s)</span>
-                </div>
-
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowMoveMenu((v) => !v);
-                      setMoveTargetFolder('');
-                    }}
-                    title="Mover itens selecionados para outra pasta"
-                    className="h-6 px-2 rounded-[2px] border text-[11px] font-medium flex items-center gap-1 cursor-pointer hover:opacity-90"
-                    style={{
-                      backgroundColor: 'var(--sat-bg-surface)',
-                      borderColor: 'var(--sat-border)',
-                    }}
-                  >
-                    <FolderInput size={12} />
-                    <span>Mover</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const selectedEntries = visibleNodes
-                        .map((n) => n.entry)
-                        .filter(
-                          (e) =>
-                            selectedFilePaths.includes(e.path) && e.type !== 'directory'
-                        );
-                      for (let i = 0; i < selectedEntries.length; i++) {
-                        await openEntry(selectedEntries[i], {
-                          sideBySide: i > 0 || selectedEntries.length === 1,
-                        });
-                      }
-                    }}
-                    title="Abrir selecionados lado a lado"
-                    className="h-6 px-1.5 rounded-[2px] border text-[11px] flex items-center gap-1 cursor-pointer hover:opacity-90"
-                    style={{
-                      backgroundColor: 'var(--sat-bg-surface)',
-                      borderColor: 'var(--sat-border)',
-                    }}
-                  >
-                    <Columns2 size={12} />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      if (
-                        window.confirm(
-                          `Excluir ${selectedFilePaths.length} item(ns) selecionado(s)?`
-                        )
-                      ) {
-                        await deleteBatchEntries(selectedFilePaths);
-                      }
-                    }}
-                    title="Excluir selecionados"
-                    className="h-6 px-1.5 rounded-[2px] border text-[11px] flex items-center gap-1 text-red-400 hover:bg-red-500/15 cursor-pointer"
-                    style={{ borderColor: 'var(--sat-border)' }}
-                  >
-                    <Trash2 size={12} />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      clearFileSelection();
-                      setShowMoveMenu(false);
-                    }}
-                    title="Limpar seleção"
-                    className="h-6 w-6 rounded-[2px] flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              </div>
-
-              {showMoveMenu && (
-                <form
-                  onSubmit={async (e) => {
-                    e.preventDefault();
-                    await moveEntries(selectedFilePaths, moveTargetFolder);
-                    setShowMoveMenu(false);
-                  }}
-                  className="flex items-center gap-1.5 pt-1"
-                >
-                  <select
-                    value={moveTargetFolder}
-                    onChange={(e) => setMoveTargetFolder(e.target.value)}
-                    className="flex-1 h-7 px-2 rounded-[3px] border text-xs font-mono"
-                    style={{
-                      backgroundColor: 'var(--sat-bg-surface)',
-                      borderColor: 'var(--sat-border)',
-                      color: 'var(--sat-text-primary)',
-                    }}
-                  >
-                    {availableDestinationFolders.map((f) => (
-                      <option key={f.path} value={f.path}>
-                        {f.label}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="submit"
-                    className="h-7 px-2.5 rounded-[3px] text-xs font-medium cursor-pointer shrink-0"
-                    style={{
-                      backgroundColor: 'var(--sat-btn-primary-bg)',
-                      color: 'var(--sat-btn-primary-text)',
-                    }}
-                  >
-                    Confirmar
-                  </button>
-                </form>
-              )}
-            </div>
-          )}
-
-          {/* Tree View List */}
-          <div className="flex-1 overflow-y-auto py-1">
-            {visibleNodes.length === 0 && (
-              <div
-                className="px-4 py-8 text-center text-xs"
-                style={{ color: 'var(--sat-text-muted)' }}
-              >
-                Pasta vazia.
-              </div>
-            )}
-
-            {visibleNodes.map(({ entry: item, depth }) => {
-              const isActive = activeTabId === item.path;
-              const isSelected = selectedFilePaths.includes(item.path);
-              const isRenaming = renamingPath === item.path;
-              const isDir = item.type === 'directory';
-              const isExpanded = Boolean(expandedFolders[item.path]);
-              const modTimeStr = showModifiedTime ? formatModifiedShort(item.modified) : '';
-
-              return (
-                <div
-                  key={item.path}
-                  onClick={(e) => handleRowClick(e, item)}
-                  title={formatModifiedTooltip(item)}
-                  style={{
-                    paddingLeft: `${depth * 14 + 8}px`,
-                    paddingRight: '8px',
-                    color: 'var(--sat-text-primary)',
-                  }}
-                  className={`saturno-file-row group h-7 text-[13px] flex items-center justify-between gap-1.5 cursor-pointer ${
-                    isActive ? 'is-active' : ''
-                  } ${isSelected ? 'is-selected' : ''}`}
-                >
-                  {/* Left: Checkbox + Chevron (if folder) + Colorful Icon + Name */}
-                  <div className="flex items-center gap-1.5 min-w-0 flex-1 h-full">
-                    {/* Multi-select checkbox (visible on hover or when any item is selected) */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (e.shiftKey) {
-                          selectFileRange(visiblePaths, item.path);
-                        } else {
-                          toggleFileSelection(item.path, false);
-                        }
-                      }}
-                      title="Selecionar item (Ctrl+Clique ou Shift+Clique)"
-                      className={`shrink-0 h-5 w-4 inline-flex items-center justify-center rounded-[2px] cursor-pointer transition-opacity ${
-                        isSelected || hasSelection
-                          ? 'opacity-100'
-                          : 'opacity-0 group-hover:opacity-75 hover:!opacity-100'
-                      }`}
-                      style={{
-                        color: isSelected
-                          ? 'var(--sat-accent)'
-                          : 'var(--sat-text-muted)',
-                      }}
-                    >
-                      {isSelected ? <CheckSquare size={13} /> : <Square size={13} />}
-                    </button>
-
-                    {/* Tree Chevron for directories */}
-                    {isDir ? (
-                      <span
-                        className="w-3.5 h-3.5 inline-flex items-center justify-center shrink-0"
-                        style={{ color: 'var(--sat-text-muted)' }}
-                      >
-                        {isExpanded ? (
-                          <ChevronDown size={13} />
-                        ) : (
-                          <ChevronRight size={13} />
-                        )}
-                      </span>
-                    ) : (
-                      <span className="w-0.5 shrink-0" />
-                    )}
-
-                    <FileTypeIcon
-                      name={item.name}
-                      type={item.type}
-                      isOpenFolder={isExpanded}
-                      size={15}
-                    />
-
-                    {isRenaming ? (
-                      <form
-                        onSubmit={async (e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          if (renameVal.trim() && renameVal.trim() !== item.name) {
-                            await renameEntry(item.path, renameVal.trim());
-                          }
-                          setRenamingPath(null);
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex-1 min-w-0"
-                      >
-                        <input
-                          autoFocus
-                          value={renameVal}
-                          onChange={(e) => setRenameVal(e.target.value)}
-                          onBlur={() => setRenamingPath(null)}
-                          className="w-full h-5 px-1.5 text-xs border rounded-[2px] bg-transparent font-mono"
-                          style={{ borderColor: 'var(--sat-border)' }}
-                        />
-                      </form>
-                    ) : (
-                      <span
-                        className={`truncate leading-none ${
-                          isActive || isSelected ? 'font-medium' : ''
-                        }`}
-                      >
-                        {item.name}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Right: Modification Time (hidden on hover when action buttons appear) + Action Buttons */}
-                  {!isRenaming && (
-                    <div className="flex items-center justify-end gap-1 shrink-0 h-5">
-                      {modTimeStr && (
-                        <span
-                          className="group-hover:hidden text-[10.5px] leading-none font-mono opacity-65 whitespace-nowrap"
-                          style={{ color: 'var(--sat-text-muted)' }}
-                        >
-                          {modTimeStr}
-                        </span>
-                      )}
-
-                      <div
-                        className="hidden group-hover:flex items-center gap-0.5 shrink-0 h-5"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {!isDir && (
-                          <button
-                            onClick={() => openEntry(item, { sideBySide: true })}
-                            title="Abrir lado a lado (Split View)"
-                            className="h-5 w-5 inline-flex items-center justify-center rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
-                            style={{ color: 'var(--sat-text-secondary)' }}
-                          >
-                            <Columns2 size={12} />
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            setRenamingPath(item.path);
-                            setRenameVal(item.name);
-                          }}
-                          title="Renomear"
-                          className="h-5 w-5 inline-flex items-center justify-center rounded-[2px] hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
-                          style={{ color: 'var(--sat-text-secondary)' }}
-                        >
-                          <Pencil size={12} />
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (window.confirm(`Remover "${item.name}"?`)) {
-                              deleteEntry(item.path);
-                            }
-                          }}
-                          title="Excluir"
-                          className="h-5 w-5 inline-flex items-center justify-center rounded-[2px] hover:bg-red-500/15 text-red-500 cursor-pointer"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      {/* 2. VARIÁVEIS EM MEMÓRIA */}
-      {leftSidebar === 'variables' && (
-        <div className="flex-1 overflow-y-auto p-2.5 space-y-2">
-          {!activeVariables ? (
-            <p
-              className="text-xs py-8 text-center"
-              style={{ color: 'var(--sat-text-muted)' }}
-            >
-              Abra um notebook para inspecionar variáveis em memória.
-            </p>
-          ) : activeVariables.length === 0 ? (
-            <p
-              className="text-xs py-8 px-2 text-center leading-relaxed"
-              style={{ color: 'var(--sat-text-muted)' }}
-            >
-              Nenhuma variável carregada ainda. Execute uma célula para inspecionar o
-              estado do kernel.
-            </p>
-          ) : (
-            activeVariables.map((v) => (
-              <div
-                key={v.name}
-                className="p-2.5 rounded-[4px] border space-y-1"
-                style={{
-                  backgroundColor: 'var(--sat-bg-subtle)',
-                  borderColor: 'var(--sat-border)',
-                }}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span
-                    className="font-mono font-semibold text-xs"
-                    style={{ color: 'var(--sat-accent)' }}
-                  >
-                    {v.name}
-                  </span>
-                  <span
-                    className="text-[11px] px-1.5 py-0.5 rounded-[2px] font-mono border"
-                    style={{
-                      backgroundColor: 'var(--sat-bg-surface)',
-                      borderColor: 'var(--sat-border)',
-                      color: 'var(--sat-text-secondary)',
-                    }}
-                  >
-                    {v.type} {v.shape}
-                  </span>
-                </div>
-                {v.preview && (
-                  <div
-                    className="text-[11.5px] font-mono break-words leading-relaxed"
-                    style={{ color: 'var(--sat-text-muted)' }}
-                  >
-                    {v.preview}
-                  </div>
-                )}
-              </div>
-            ))
-          )}
+      {s.panel === 'files' && <>
+        <div className="h-9 px-3 flex items-center gap-1 border-b shrink-0" style={{ borderColor: 'var(--sat-border)' }}>
+          <button className="truncate text-xs flex-1 text-left px-1.5 py-1 -ml-1.5 rounded hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors" title="Raiz do workspace · solte arquivos aqui para mover"
+            onClick={() => a.setActiveFolderContext('')} onDragOver={e => e.preventDefault()} onDrop={e => drop(e, '')}>/{s.folder}</button>
+          <button className="sat-icon-btn" title="Novo…" aria-label="Novo arquivo ou pasta" onClick={e => { const r = e.currentTarget.getBoundingClientRect(); setContext({ x: r.left, y: r.bottom }); }}><Plus size={16} /></button>
+          <button className="sat-icon-btn" title="Recolher pastas" onClick={a.collapseAllFolders}><ChevronsDownUp size={15} /></button>
+          <button className="sat-icon-btn" title="Atualizar arquivos" onClick={() => void perform(a.refreshFiles)}><RefreshCw size={15} /></button>
         </div>
-      )}
-
-      {/* Interactive Resize Handle on Inner Edge */}
-      <div
-        onMouseDown={startResize}
-        onDoubleClick={() => setSidebarWidth(280, true)}
-        title="Arraste para ajustar a largura (duplo clique para 280px)"
-        className={`absolute top-0 bottom-0 w-1.5 z-20 cursor-col-resize transition-colors ${
-          sidebarPosition === 'left' ? 'right-0' : 'left-0'
-        } ${isResizing ? 'bg-amber-500/60' : 'hover:bg-amber-500/40'}`}
-      />
-    </aside>
-  );
+        {naming && <form className="p-3 border-b flex flex-wrap items-center gap-2" onSubmit={e => { e.preventDefault(); void perform(async () => {
+          const clean = name.trim(); if (!clean) return;
+          if (naming.kind === 'rename' && naming.entry) await a.renameEntry(naming.entry.path, clean);
+          else if (naming.kind === 'folder') await a.createNewFolder(clean, naming.folder);
+          else if (naming.kind === 'notebook') { const result = await apiFetch<{path: string}>('/api/fs/notebook/create', { method: 'POST', body: JSON.stringify({folder: naming.folder, name: clean}) }); if (naming.folder) await a.setFolderExpanded(naming.folder, true); await a.refreshFiles(); await a.openNotebookByPath(result.path); }
+          else await a.createNewFile(naming.folder, clean);
+          setNaming(null);
+        }); }}>
+          <label className="text-xs w-full">{naming.kind === 'rename' ? 'Renomear' : 'Criar'} em /{naming.folder}</label>
+          <input aria-label="Nome" autoFocus value={name} onFocus={e => e.target.select()} onChange={e => setName(e.target.value)} className="min-w-0 flex-1 border rounded px-2 py-1 text-sm" style={{background:'var(--sat-bg-canvas)'}} />
+          <button className="px-2 py-1 rounded text-xs font-medium hover:opacity-85 transition-opacity" style={{ background: 'var(--sat-btn-primary-bg)', color: 'var(--sat-btn-primary-text)' }} type="submit">Confirmar</button><button type="button" className="sat-icon-btn" aria-label="Cancelar" onClick={() => setNaming(null)}><X size={14} /></button>
+        </form>}
+        {error && <div role="alert" className="p-3 text-xs text-red-500">{error}</div>}
+        {s.selected.length > 1 && <div className="px-3 py-1 text-xs" style={{color:'var(--sat-text-secondary)'}}>{s.selected.length} itens selecionados</div>}
+        <div role="tree" aria-label="Arquivos do workspace" aria-multiselectable="true" tabIndex={0} className="flex-1 overflow-auto py-1 outline-none"
+          onContextMenu={e => { e.preventDefault(); setContext({x:e.clientX,y:e.clientY}); }}
+          onClick={e => { if (e.target === e.currentTarget) a.clearFileSelection(); }}
+          onKeyDown={e => {
+            if ((e.target as HTMLElement).closest('input')) return;
+            const key = e.key.toLowerCase(), ctrl = e.ctrlKey || e.metaKey;
+            if (ctrl && ['a','c','v','d','x'].includes(key)) {
+              e.preventDefault(); e.stopPropagation();
+              if (key === 'a') a.selectAllFiles(paths);
+              if (key === 'c' || key === 'x') { clipboardCut = key === 'x'; fileClipboard = [...s.selected]; useSaturnoStore.setState({statusMessage:`${fileClipboard.length} item(ns) copiado(s) para colar`}); }
+              if (key === 'v' && fileClipboard.length) void perform(() => pasteTo(s.folder));
+              if (key === 'd') void perform(() => copyTo(s.selected, parentOf(s.selected[0] || '')));
+            } else if (e.key === 'Delete') { e.preventDefault(); void remove(); }
+            else if (e.key === 'F2' && s.selected.length === 1) { e.preventDefault(); startNaming('rename', nodes.find(n => n.entry.path === s.selected[0])?.entry); }
+            else if (e.key === 'Escape') a.clearFileSelection();
+            else if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
+              e.preventDefault(); e.stopPropagation();
+              const current = (e.target as HTMLElement).closest('[data-file-path]')?.getAttribute('data-file-path');
+              const index = paths.indexOf(current || s.selected[s.selected.length - 1]);
+              const node = nodes[index];
+              if (e.key === ' ' && node) { a.toggleFileSelection(node.entry.path, !(e.ctrlKey || e.metaKey)); return; }
+              if (node?.entry.type === 'directory' && e.key === 'ArrowRight') { void a.setFolderExpanded(node.entry.path, true); return; }
+              if (node?.entry.type === 'directory' && s.expanded[node.entry.path] && e.key === 'ArrowLeft') { void a.setFolderExpanded(node.entry.path, false); return; }
+              const next = e.key === 'ArrowLeft' ? paths.indexOf(parentOf(current || '')) : Math.max(0, Math.min(nodes.length - 1, index + (e.key === 'ArrowUp' ? -1 : 1)));
+              if (next >= 0 && nodes[next]) {
+                if(e.shiftKey) a.selectFileRange(paths, paths[next]); else a.toggleFileSelection(paths[next], true);
+                (e.currentTarget.querySelectorAll('[role="treeitem"]')[next] as HTMLElement)?.focus();
+              }
+            }
+          }}>
+          {!nodes.length && <p className="p-4 text-sm" style={{color:'var(--sat-text-muted)'}}>Pasta vazia. Clique com o botão direito para criar um arquivo.</p>}
+          {nodes.map(({entry,depth}) => <div key={entry.path} data-file-path={entry.path} role="treeitem" tabIndex={0} aria-level={depth + 1} aria-selected={s.selected.includes(entry.path)} aria-expanded={entry.type === 'directory' ? !!s.expanded[entry.path] : undefined}
+            onPointerEnter={entry.type === 'notebook' ? () => { void import('./NotebookView').catch(() => {}); } : undefined}
+            draggable title={formatModifiedTooltip(entry)}
+            className={`saturno-file-row h-8 flex items-center gap-2 text-[13px] cursor-pointer ${s.selected.includes(entry.path) ? 'is-selected' : ''} ${dropFolder === entry.path ? 'drop-target' : ''}`}
+            style={{paddingLeft:depth*14+10,paddingRight:10}}
+            onClick={e => {
+              e.stopPropagation(); e.currentTarget.focus();
+              if (e.shiftKey) { a.selectFileRange(paths,entry.path); return; }
+              if (e.ctrlKey || e.metaKey) { a.toggleFileSelection(entry.path); return; }
+              a.toggleFileSelection(entry.path,true);
+              a.setActiveFolderContext(entry.type === 'directory' ? entry.path : parentOf(entry.path));
+              if (entry.type === 'directory') void a.toggleFolderExpanded(entry.path); else void perform(() => a.openEntry(entry));
+            }}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); if(entry.type === 'directory') void a.toggleFolderExpanded(entry.path); else void perform(() => a.openEntry(entry)); } }}
+            onContextMenu={e => { e.preventDefault(); e.stopPropagation(); if(!s.selected.includes(entry.path)) a.toggleFileSelection(entry.path,true); setContext({x:e.clientX,y:e.clientY,entry}); }}
+            onDragStart={e => {
+              const selected = s.selected.includes(entry.path) ? s.selected : [entry.path];
+              if(!s.selected.includes(entry.path)) a.toggleFileSelection(entry.path,true);
+              e.dataTransfer.setData('application/x-saturno-paths',JSON.stringify(selected));
+              e.dataTransfer.setData('application/x-saturno-entry',JSON.stringify(entry));
+              e.dataTransfer.setData('application/x-saturno-entries',JSON.stringify(nodes.filter(n=>selected.includes(n.entry.path)).map(n=>n.entry)));
+              e.dataTransfer.effectAllowed='copyMove';
+            }}
+            onDragOver={e => { if(entry.type==='directory' && e.dataTransfer.types.includes('application/x-saturno-paths')) { e.preventDefault(); e.stopPropagation(); setDropFolder(entry.path); e.dataTransfer.dropEffect='move'; } }}
+            onDragLeave={() => setDropFolder(null)} onDragEnd={() => setDropFolder(null)}
+            onDrop={e => { if(entry.type==='directory') drop(e,entry.path); }}>
+            {entry.type==='directory' && (s.expanded[entry.path] ? <ChevronDown size={13}/> : <ChevronRight size={13}/>)}
+            <FileTypeIcon name={entry.name} type={entry.type} isOpenFolder={!!s.expanded[entry.path]} size={16}/>
+            <span className="truncate flex-1">{entry.name}</span>
+            {s.showTime && entry.modified && !Number.isNaN(Date.parse(entry.modified)) &&
+              <time className="file-modified" dateTime={entry.modified} title={`Modificado em ${new Date(entry.modified).toLocaleString('pt-BR')}`}>
+                {formatModifiedShort(entry.modified, modifiedNow)}
+              </time>}
+          </div>)}
+        </div>
+      </>}
+      {s.panel === 'outline' && <div className="flex-1 overflow-auto py-2">
+        {!headings.length && <p className="p-4 text-sm" style={{color:'var(--sat-text-muted)'}}>Os títulos Markdown (H1–H6) do notebook aparecem aqui.</p>}
+        {headings.map(h => <div key={`${h.cellId}-${h.ordinal}`} className="flex items-center pr-2" style={{paddingLeft:8+(h.level-1)*12}}>
+          {h.ordinal === 0 ? <button title="Recolher / expandir seção" aria-expanded={!notebook?.cells[h.index].sectionCollapsed} className="sat-icon-btn p-1" onClick={()=>a.toggleSection(h.cellId)}>{notebook?.cells[h.index].sectionCollapsed ? <ChevronRight size={14}/> : <ChevronDown size={14}/>}</button> : <span className="w-6"/>}
+          <button className="text-sm py-1.5 px-2 my-0.5 rounded truncate text-left flex-1 hover:bg-[var(--sat-bg-hover)] transition-colors" title={h.title} onClick={()=>navigate(h.cellId,h.ordinal)}>{h.title}</button>
+        </div>)}
+      </div>}
+      {s.panel === 'variables' && <div className="flex-1 overflow-auto p-3 space-y-3">
+        {!notebook?.variables.length && <p className="text-sm" style={{color:'var(--sat-text-muted)'}}>Execute uma célula para inspecionar as variáveis.</p>}
+        {notebook?.variables.map(v=><div key={v.name} className="border rounded p-3 text-sm" style={{borderColor:'var(--sat-border)'}}><b>{v.name}</b><span className="ml-2 opacity-70">{v.type} {v.shape}</span><pre className="text-xs whitespace-pre-wrap mt-2">{v.preview}</pre></div>)}
+      </div>}
+      <div className={`absolute inset-y-0 w-1.5 cursor-col-resize ${s.position==='left'?'right-0':'left-0'}`} title="Redimensionar painel"
+        onMouseDown={e=>{ e.preventDefault(); const start=e.clientX, width=s.width; const move=(event:MouseEvent)=>a.setSidebarWidth(width+(event.clientX-start)*(s.position==='left'?1:-1),false); const end=()=>{a.setSidebarWidth(useSaturnoStore.getState().sidebarWidth,true);window.removeEventListener('mousemove',move);window.removeEventListener('mouseup',end);};window.addEventListener('mousemove',move);window.addEventListener('mouseup',end); }} />
+    </aside>}
+    {context && createPortal(<div ref={menuRef} data-app-menu className="file-context-menu" style={{left:context.x+250>window.innerWidth-8?Math.max(8,context.x-250):Math.max(8,context.x),top:context.y+(context.entry?390:200)>window.innerHeight-8?Math.max(8,context.y-(context.entry?390:200)):Math.max(8,context.y)}}>
+      {context.entry && <>
+        {menuItem('Abrir lado a lado',()=>a.openEntry(context.entry!,{sideBySide:true}),context.entry.type==='directory')}
+        {menuItem('Copiar · Ctrl+C',()=>{clipboardCut=false; fileClipboard=[...useSaturnoStore.getState().selectedFilePaths];})}
+        {menuItem('Recortar · Ctrl+X',()=>{clipboardCut=true; fileClipboard=[...s.selected];})}
+        {menuItem('Duplicar · Ctrl+D',()=>copyTo(s.selected,parentOf(context.entry!.path)))}
+        {menuItem('Renomear · F2',()=>startNaming('rename',context.entry),s.selected.length!==1)}
+        {menuItem('Excluir · Delete',remove)}<hr />
+      </>}
+      {menuItem('Colar aqui · Ctrl+V',()=>pasteTo(context.entry?.type==='directory'?context.entry.path:context.entry?parentOf(context.entry.path):s.folder),!fileClipboard.length)}
+      {menuItem('Novo notebook…',()=>startNaming('notebook'))}
+      {menuItem('Novo arquivo Python…',()=>startNaming('python'))}
+      {menuItem('Novo Markdown…',()=>startNaming('markdown'))}
+      {menuItem('Novo arquivo…',()=>startNaming('file'))}
+      {menuItem('Nova pasta…',()=>startNaming('folder'))}
+    </div>,document.body)}
+  </>;
 });

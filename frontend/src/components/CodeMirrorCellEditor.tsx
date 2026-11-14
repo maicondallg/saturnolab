@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Annotation, EditorState, Compartment } from '@codemirror/state';
 import {
   EditorView,
@@ -149,6 +149,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   onTriggerAI,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [ready, setReady] = useState(Boolean(autoFocus || fullHeight));
   const viewRef = useRef<EditorView | null>(null);
   const lastValueRef = useRef<string>((value || '').replace(/\r\n/g, '\n'));
 
@@ -185,8 +186,26 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     onTriggerAI,
   };
 
+  // Keep a lightweight source preview until an editor approaches the viewport.
+  // Once mounted, retain it so scrolling never loses selection or undo history.
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (ready || !containerRef.current) return;
+    if (autoFocus || typeof IntersectionObserver === 'undefined') {
+      setReady(true);
+      return;
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        setReady(true);
+        observer.disconnect();
+      }
+    }, { root: containerRef.current.closest('[data-notebook-scroll]'), rootMargin: '400px 0px' });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, [ready, autoFocus]);
+
+  useEffect(() => {
+    if (!ready || !containerRef.current) return;
 
     const initialNormalized = (value || '').replace(/\r\n/g, '\n');
     lastValueRef.current = initialNormalized;
@@ -349,7 +368,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       viewRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [ready]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -403,6 +422,9 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     <div
       ref={containerRef}
       className={`saturno-cm-wrapper w-full ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
-    />
+      onClick={!ready ? (e) => { e.stopPropagation(); setReady(true); cbRef.current.onFocus?.(); } : undefined}
+    >
+      {!ready && <pre className="editor-source-preview" style={{ paddingLeft: showLineNumbers ? 48 : 8 }}>{value || placeholder || ' '}</pre>}
+    </div>
   );
 };

@@ -280,9 +280,13 @@ def create_notebook(
     folder.mkdir(parents=True, exist_ok=True)
 
     if filename:
+        if "/" in filename or "\\" in filename:
+            raise ValueError("Use apenas o nome do notebook.")
         if not filename.endswith(".ipynb"):
             filename += ".ipynb"
         candidate = folder / filename
+        if candidate.exists():
+            raise FileExistsError(f"Já existe '{filename}' nesta pasta.")
     else:
         idx = 1
         candidate = folder / "Untitled.ipynb"
@@ -396,18 +400,20 @@ def create_text_file(
     return read_text_file(workspace_root, rel)
 
 
-def move_entries(
+def plan_move_entries(
     workspace_root: Path, paths: list[str], target_folder: str = ""
-) -> dict[str, Any]:
+) -> list[tuple[Path, Path, str]]:
     root_resolved = workspace_root.resolve()
     dst_dir = safe_resolve(workspace_root, target_folder)
     if not dst_dir.exists() or not dst_dir.is_dir():
         raise ValueError(f"Pasta de destino inválida: {target_folder}")
 
-    moved: list[dict[str, str]] = []
-    for rel_path in paths:
+    planned: list[tuple[Path, Path, str]] = []
+    for rel_path in sorted(set(paths), key=len):
         src = safe_resolve(workspace_root, rel_path)
         if not src.exists() or src == root_resolved:
+            raise ValueError("Origem inválida.")
+        if any(parent == src or parent in src.parents for parent, _, _ in planned):
             continue
         if src.is_dir() and (dst_dir == src or src in dst_dir.parents):
             raise ValueError(f"Não é possível mover a pasta '{src.name}' para dentro dela mesma.")
@@ -416,8 +422,17 @@ def move_entries(
             continue
         if root_resolved not in dst.parents:
             raise PermissionError("Destino fora do diretório de trabalho.")
-        if dst.exists():
+        if dst.exists() or any(target == dst for _, target, _ in planned):
             raise FileExistsError(f"Já existe '{src.name}' na pasta de destino.")
+        planned.append((src, dst, rel_path))
+    return planned
+
+
+def move_entries(workspace_root: Path, paths: list[str], target_folder: str = "") -> dict[str, Any]:
+    root_resolved = workspace_root.resolve()
+    planned = plan_move_entries(workspace_root, paths, target_folder)
+    moved: list[dict[str, str]] = []
+    for src, dst, rel_path in planned:
         src.rename(dst)
         moved.append(
             {
@@ -446,3 +461,35 @@ def delete_entries(workspace_root: Path, paths: list[str]) -> dict[str, Any]:
             target.unlink()
         deleted.append(rel_path)
     return {"deleted": deleted}
+
+
+def copy_entries(workspace_root: Path, paths: list[str], target_folder: str = "") -> dict[str, Any]:
+    root = workspace_root.resolve()
+    destination = safe_resolve(root, target_folder)
+    if not destination.is_dir():
+        raise ValueError("Pasta de destino inválida.")
+    sources = []
+    for path in sorted(set(paths), key=len):
+        source = safe_resolve(root, path)
+        if source == root or not source.exists():
+            raise ValueError("Origem inválida.")
+        if any(parent == source or parent in source.parents for parent in sources):
+            continue
+        if source.is_dir() and (source == destination or source in destination.parents):
+            raise ValueError("Não é possível copiar uma pasta para dentro dela mesma.")
+        if source.is_symlink() or (source.is_dir() and any(p.is_symlink() for p in source.rglob('*'))):
+            raise ValueError("A cópia de links simbólicos não é suportada.")
+        sources.append(source)
+    copied = []
+    for source in sources:
+        target = destination / source.name
+        counter = 1
+        while target.exists():
+            target = destination / f"{source.stem}_copy{counter}{source.suffix}"
+            counter += 1
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+        copied.append(str(target.relative_to(root)))
+    return {"copied": copied}

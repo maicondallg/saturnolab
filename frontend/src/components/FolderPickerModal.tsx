@@ -73,7 +73,7 @@ export const FolderPickerModal: React.FC = React.memo(() => {
           <h3 className="font-semibold text-sm m-0">Conectar Diretório</h3>
           <button
             onClick={() => setShowFolderModal(false)}
-            className="p-1 rounded-[3px] hover:bg-black/10 dark:hover:bg-white/5 cursor-pointer"
+            className="sat-icon-btn p-1"
           >
             <X size={16} />
           </button>
@@ -85,7 +85,7 @@ export const FolderPickerModal: React.FC = React.memo(() => {
               type="button"
               onClick={() => homeDir && loadDirs(homeDir)}
               title="Home"
-              className="h-8 px-2.5 rounded-[3px] border cursor-pointer"
+              className="h-8 px-2.5 rounded-[3px] border hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
               style={{ borderColor: 'var(--sat-border)' }}
             >
               <Home size={14} />
@@ -95,7 +95,7 @@ export const FolderPickerModal: React.FC = React.memo(() => {
               disabled={!parentDir}
               onClick={() => parentDir && loadDirs(parentDir)}
               title="Subir nível"
-              className="h-8 px-2.5 rounded-[3px] border disabled:opacity-40 cursor-pointer"
+              className="h-8 px-2.5 rounded-[3px] border hover:bg-[var(--sat-bg-hover)] transition-colors disabled:opacity-40 cursor-pointer"
               style={{ borderColor: 'var(--sat-border)' }}
             >
               <ArrowUp size={14} />
@@ -129,7 +129,7 @@ export const FolderPickerModal: React.FC = React.memo(() => {
                 <div
                   key={d.path}
                   onClick={() => loadDirs(d.path)}
-                  className="px-3.5 py-2 text-xs flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                  className="px-3.5 py-2 text-xs flex items-center gap-2 hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
                   style={{ borderColor: 'var(--sat-border-subtle)' }}
                 >
                   <Folder size={14} style={{ color: 'var(--sat-text-secondary)' }} />
@@ -147,7 +147,7 @@ export const FolderPickerModal: React.FC = React.memo(() => {
           <button
             type="button"
             onClick={() => setShowFolderModal(false)}
-            className="h-8 px-3.5 rounded-[3px] border text-xs font-medium cursor-pointer"
+            className="h-8 px-3.5 rounded-[3px] border text-xs font-medium hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
             style={{ borderColor: 'var(--sat-border)' }}
           >
             Cancelar
@@ -161,7 +161,7 @@ export const FolderPickerModal: React.FC = React.memo(() => {
                 setError(err.message);
               }
             }}
-            className="h-8 px-4 rounded-[3px] text-xs font-medium cursor-pointer"
+            className="h-8 px-4 rounded-[3px] text-xs font-medium hover:opacity-90 transition-opacity cursor-pointer"
             style={{
               backgroundColor: 'var(--sat-btn-primary-bg)',
               color: 'var(--sat-btn-primary-text)',

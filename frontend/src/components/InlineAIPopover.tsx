@@ -319,7 +319,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
             tabIndex={-1}
             onClick={triggerSubmit}
             title="Gerar novamente"
-            className="h-6.5 px-2 rounded-[3px] border text-xs font-medium flex items-center gap-1 hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer shrink-0 transition-colors"
+            className="h-6.5 px-2 rounded-[3px] border text-xs font-medium flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer shrink-0 transition-colors"
             style={{
               backgroundColor: 'var(--sat-bg-surface)',
               borderColor: 'var(--sat-border)',
@@ -351,7 +351,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
           tabIndex={-1}
           onClick={() => closeInlineAI(cellId)}
           title="Fechar (Esc)"
-          className="h-6.5 w-6.5 rounded-[3px] flex items-center justify-center opacity-60 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer shrink-0"
+          className="h-6.5 w-6.5 rounded-[3px] flex items-center justify-center opacity-60 hover:opacity-100 hover:bg-[var(--sat-bg-hover)] cursor-pointer shrink-0"
         >
           <X size={14} />
         </button>
@@ -410,7 +410,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
                     type="button"
                     tabIndex={-1}
                     onClick={() => closeInlineAI(cellId)}
-                    className="h-7 px-2.5 rounded-[3px] text-xs font-medium flex items-center gap-1.5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+                    className="h-7 px-2.5 rounded-[3px] text-xs font-medium flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
                     style={{ color: 'var(--sat-text-muted)' }}
                   >
                     <span>Descartar</span>
