@@ -53,18 +53,42 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
   stateRef.current = { aiState, hasExistingCode, cellId };
 
   useEffect(() => {
-    if (aiState.isOpen && (aiState.status === 'idle' || aiState.status === 'preview')) {
-      setTimeout(() => inputRef.current?.focus(), 10);
+    if (!aiState.isOpen) return;
+    const timer = window.setTimeout(() => inputRef.current?.focus(), 10);
+    return () => window.clearTimeout(timer);
+  }, [aiState.isOpen]);
+
+  useEffect(() => {
+    if (aiState.status === 'streaming') {
+      lastSubmittedPromptRef.current = aiState.prompt.trim();
     }
-  }, [aiState.isOpen, aiState.status]);
+  }, [aiState.status, aiState.prompt]);
+
+  const restoreEditorFocus = () => {
+    const editor = rootRef.current?.closest('[data-cell-id]')
+      ?.querySelector<HTMLElement>('.cm-content');
+    requestAnimationFrame(() => {
+      if (editor?.isConnected) editor.focus();
+    });
+  };
+
+  const dismiss = () => {
+    restoreEditorFocus();
+    closeInlineAI(cellId);
+  };
+
+  const accept = (andRun: boolean) => {
+    restoreEditorFocus();
+    acceptInlineAI(cellId, andRun);
+  };
 
   const cycleApplyMode = () => {
     const { aiState: cur } = stateRef.current;
     if (cur.selection) {
       const order: Array<'replace_selection' | 'append_cell' | 'replace_cell'> = [
         'replace_selection',
-        'append_cell',
         'replace_cell',
+        'append_cell',
       ];
       const next = order[(order.indexOf(cur.applyMode) + 1) % order.length];
       setInlineAIApplyMode(cellId, next);
@@ -83,89 +107,76 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
     submitInlineAI(cellId);
   };
 
-  useEffect(() => {
-    if (!aiState.isOpen) return;
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.defaultPrevented || e.nativeEvent.isComposing) return;
+    const inPrompt = e.target === inputRef.current;
+    const cur = stateRef.current.aiState;
+    const promptEditedAfterPreview =
+      cur.status === 'preview' &&
+      cur.prompt.trim() !== lastSubmittedPromptRef.current;
 
-    const onWindowKeyDown = (e: KeyboardEvent) => {
-      const activeEl = document.activeElement as HTMLElement | null;
-      if (activeEl && activeEl.closest('[data-modal-root="true"]')) {
-        return;
+    if (e.key === 'Tab' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey &&
+        inPrompt && (cur.selection || stateRef.current.hasExistingCode) &&
+        (cur.status === 'idle' || cur.status === 'preview')) {
+      e.preventDefault();
+      e.stopPropagation();
+      cycleApplyMode();
+      return;
+    }
+
+    if (
+      e.key === 'Tab' &&
+      !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey &&
+      inPrompt && !promptEditedAfterPreview &&
+      cur.status === 'preview' &&
+      cur.streamedCode.trim()
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      accept(false);
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (cur.status === 'streaming') {
+        cancelInlineAI(cellId);
+      } else {
+        dismiss();
       }
-      const insideThisPopover = rootRef.current?.contains(activeEl);
-      const inOtherEditor =
-        activeEl && activeEl.closest('.cm-editor') && !insideThisPopover;
-      if (inOtherEditor) return;
+      return;
+    }
 
-      const cur = stateRef.current.aiState;
-      const promptEditedAfterPreview =
-        cur.status === 'preview' &&
-        cur.prompt.trim() !== lastSubmittedPromptRef.current;
-
-      if (e.key === 'Tab' && e.shiftKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        cycleApplyMode();
-        return;
-      }
-
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
       if (
-        e.key === 'Tab' &&
-        !e.shiftKey &&
         cur.status === 'preview' &&
-        cur.streamedCode.trim()
+        cur.streamedCode.trim() &&
+        !promptEditedAfterPreview
       ) {
-        e.preventDefault();
-        e.stopPropagation();
-        acceptInlineAI(cellId, false);
-        return;
+        accept(true);
+      } else if (cur.prompt.trim() && cur.status !== 'streaming') {
+        triggerSubmit();
       }
+      return;
+    }
 
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        if (cur.status === 'streaming') {
-          cancelInlineAI(cellId);
-        } else {
-          closeInlineAI(cellId);
-        }
-        return;
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && inPrompt) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (
+        cur.status === 'preview' &&
+        cur.streamedCode.trim() &&
+        !promptEditedAfterPreview
+      ) {
+        accept(false);
+      } else if (cur.status !== 'streaming' && cur.prompt.trim()) {
+        triggerSubmit();
       }
-
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (
-          cur.status === 'preview' &&
-          cur.streamedCode.trim() &&
-          !promptEditedAfterPreview
-        ) {
-          acceptInlineAI(cellId, true);
-        } else if (cur.prompt.trim() && cur.status !== 'streaming') {
-          triggerSubmit();
-        }
-        return;
-      }
-
-      if (e.key === 'Enter' && !e.shiftKey && !e.altKey && insideThisPopover) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (
-          cur.status === 'preview' &&
-          cur.streamedCode.trim() &&
-          !promptEditedAfterPreview
-        ) {
-          acceptInlineAI(cellId, false);
-        } else if (cur.status !== 'streaming' && cur.prompt.trim()) {
-          triggerSubmit();
-        }
-      }
-    };
-
-    window.addEventListener('keydown', onWindowKeyDown, { capture: true });
-    return () =>
-      window.removeEventListener('keydown', onWindowKeyDown, { capture: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiState.isOpen, cellId]);
+    }
+  };
 
   const promptChangedSincePreview =
     aiState.status === 'preview' &&
@@ -225,7 +236,6 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
               <button
                 key={opt.id}
                 type="button"
-                tabIndex={-1}
                 onClick={() => setInlineAIApplyMode(cellId, opt.id)}
                 className="px-2 py-0.5 rounded-[2px] text-[11.5px] font-medium transition-colors cursor-pointer"
                 style={{
@@ -241,7 +251,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
           })}
         </div>
         <kbd
-          title="Shift+Tab alterna entre Substituir e + No final"
+          title="Shift+Tab no campo de instrução alterna o modo de aplicação"
           className="text-[10px] font-mono px-1 py-0.5 rounded-[2px] border opacity-70 select-none"
           style={{
             borderColor: 'var(--sat-border)',
@@ -257,6 +267,8 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
   return (
     <div
       ref={rootRef}
+      data-inline-ai
+      onKeyDown={onKeyDown}
       onClick={(e) => e.stopPropagation()}
       className="border-b transition-colors"
       style={{
@@ -283,6 +295,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
         <input
           ref={inputRef}
           type="text"
+          aria-label="Instrução para a IA"
           value={aiState.prompt}
           readOnly={aiState.status === 'streaming'}
           onChange={(e) => setInlineAIPrompt(cellId, e.target.value)}
@@ -302,7 +315,6 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
         {aiState.status === 'streaming' ? (
           <button
             type="button"
-            tabIndex={-1}
             onClick={() => cancelInlineAI(cellId)}
             className="h-6.5 px-2.5 rounded-[3px] border text-xs font-medium cursor-pointer shrink-0 transition-colors"
             style={{
@@ -316,7 +328,6 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
         ) : aiState.status === 'preview' && !promptChangedSincePreview ? (
           <button
             type="button"
-            tabIndex={-1}
             onClick={triggerSubmit}
             title="Gerar novamente"
             className="h-6.5 px-2 rounded-[3px] border text-xs font-medium flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer shrink-0 transition-colors"
@@ -332,7 +343,6 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
         ) : (
           <button
             type="button"
-            tabIndex={-1}
             disabled={!aiState.prompt.trim()}
             onClick={triggerSubmit}
             title="Enviar (Enter)"
@@ -348,9 +358,9 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
 
         <button
           type="button"
-          tabIndex={-1}
-          onClick={() => closeInlineAI(cellId)}
+          onClick={dismiss}
           title="Fechar (Esc)"
+          aria-label="Fechar IA"
           className="h-6.5 w-6.5 rounded-[3px] flex items-center justify-center opacity-60 hover:opacity-100 hover:bg-[var(--sat-bg-hover)] cursor-pointer shrink-0"
         >
           <X size={14} />
@@ -408,8 +418,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
                 <div className="flex items-center gap-1.5 ml-auto">
                   <button
                     type="button"
-                    tabIndex={-1}
-                    onClick={() => closeInlineAI(cellId)}
+                    onClick={dismiss}
                     className="h-7 px-2.5 rounded-[3px] text-xs font-medium flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] transition-colors cursor-pointer"
                     style={{ color: 'var(--sat-text-muted)' }}
                   >
@@ -424,8 +433,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
 
                   <button
                     type="button"
-                    tabIndex={-1}
-                    onClick={() => acceptInlineAI(cellId, false)}
+                    onClick={() => accept(false)}
                     className="h-7 px-2.5 rounded-[3px] border text-xs font-medium flex items-center gap-1.5 hover:opacity-90 transition-opacity cursor-pointer"
                     style={{
                       backgroundColor: 'var(--sat-bg-subtle)',
@@ -445,8 +453,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
 
                   <button
                     type="button"
-                    tabIndex={-1}
-                    onClick={() => acceptInlineAI(cellId, true)}
+                    onClick={() => accept(true)}
                     className="h-7 px-2.5 rounded-[3px] text-xs font-medium flex items-center gap-1.5 hover:opacity-90 transition-opacity cursor-pointer"
                     style={{
                       backgroundColor: 'var(--sat-btn-primary-bg)',

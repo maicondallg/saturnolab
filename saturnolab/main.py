@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -507,11 +508,23 @@ if (STATIC_DIR / "assets").exists():
 async def serve_spa(full_path: str):
     if STATIC_DIR.exists():
         candidate = (STATIC_DIR / full_path).resolve()
-        if full_path and candidate.is_file() and STATIC_DIR.resolve() in candidate.parents:
+        if full_path and candidate.name != "index.html" and candidate.is_file() and STATIC_DIR.resolve() in candidate.parents:
             return FileResponse(str(candidate))
         index_file = STATIC_DIR / "index.html"
         if index_file.is_file():
-            return FileResponse(str(index_file))
+            # Supply only UI settings, so the first render has the final geometry.
+            cfg = config_manager.config
+            fields = (
+                "theme", "active_provider", "include_kernel_variables", "notebook_layout",
+                "sidebar_position", "sidebar_width", "editor_font_size", "show_line_numbers",
+                "auto_scroll_on_run", "show_modified_time", "confirm_kernel_restart", "output_display",
+            )
+            bootstrap = {field: getattr(cfg, field) for field in fields}
+            bootstrap.update(workspace_dir=str(config_manager.get_workspace_path()), providers={})
+            payload = json.dumps(bootstrap).replace("<", "\\u003c")
+            html = await run_in_threadpool(index_file.read_text, encoding="utf-8")
+            html = html.replace("</head>", f"<script>window.__SATURNO_BOOTSTRAP__={payload};</script></head>")
+            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
     return HTMLResponse(
         "<h3>SaturnoLab frontend static assets not built yet. Run <code>npm run build</code> in <code>frontend/</code>.</h3>",
         status_code=503,

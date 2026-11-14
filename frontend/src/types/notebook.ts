@@ -90,6 +90,7 @@ export interface InlineAIState {
 
 export interface OpenNotebookTab {
   kind: 'notebook';
+  loading?: boolean;
   id: string; // path
   path: string;
   name: string;
@@ -103,6 +104,7 @@ export interface OpenNotebookTab {
 
 export interface OpenTextFileTab {
   kind: 'file';
+  loading?: boolean;
   id: string;
   path: string;
   name: string;

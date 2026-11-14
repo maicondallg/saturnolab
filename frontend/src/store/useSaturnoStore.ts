@@ -1,6 +1,9 @@
 import { create } from 'zustand';
 import { api, wsClient } from '../services/api';
+import { loadNotebookView, loadTextFileView } from '../services/editorViews';
 import { normalizeThemeId } from '../themes';
+import { bootstrapConfig, persistAppearance } from '../services/bootstrap';
+import { hasUnsavedChanges, initialWorkspaceSession, reconcileRestoredSession, preloadWorkspaceEditors, restoreWorkspaceSession, saveWorkspaceSession } from '../services/workspaceSession';
 import {
   CellType,
   EditorPane,
@@ -189,8 +192,11 @@ interface SaturnoStore {
 }
 
 let initializing = false;
+let restoringSession = false;
+let sessionPersistenceReady = false;
 
 const INITIAL_PANE_ID = 'pane_main';
+const initialSession = initialWorkspaceSession(bootstrapConfig?.workspace_dir || '');
 
 function loadExpandedFolders(): Record<string, boolean> {
   try {
@@ -211,23 +217,23 @@ function saveExpandedFolders(map: Record<string, boolean>) {
 
 export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   initialized: false,
-  config: null,
-  workspaceRoot: '',
+  config: bootstrapConfig || null,
+  workspaceRoot: bootstrapConfig?.workspace_dir || '',
   currentDir: '',
   files: [],
   leftSidebar: 'files',
 
   notebookLayout:
-    (window.localStorage.getItem('saturno_nb_layout') as 'centered' | 'expanded') ||
+    bootstrapConfig?.notebook_layout || (window.localStorage.getItem('saturno_nb_layout') as 'centered' | 'expanded') ||
     'centered',
   sidebarPosition:
-    (window.localStorage.getItem('saturno_sidebar_pos') as 'left' | 'right') || 'left',
-  sidebarWidth: Number(window.localStorage.getItem('saturno_sidebar_width')) || 280,
-  showLineNumbers: true,
+    bootstrapConfig?.sidebar_position || (window.localStorage.getItem('saturno_sidebar_pos') as 'left' | 'right') || 'left',
+  sidebarWidth: bootstrapConfig?.sidebar_width || Number(window.localStorage.getItem('saturno_sidebar_width')) || 280,
+  showLineNumbers: bootstrapConfig?.show_line_numbers ?? true,
   autoScrollOnRun: true,
-  showModifiedTime: true,
+  showModifiedTime: bootstrapConfig?.show_modified_time ?? true,
   confirmKernelRestart: false,
-  editorFontSize: Number(window.localStorage.getItem('saturno_font_size')) || 14,
+  editorFontSize: bootstrapConfig?.editor_font_size || Number(window.localStorage.getItem('saturno_font_size')) || 14,
 
   showFolderModal: false,
   showAIModal: false,
@@ -242,17 +248,12 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   lastClickedFilePath: null,
   activeFolderContext: '',
 
-  tabs: [{ kind: 'launcher', id: '__launcher__', name: 'Launcher' }],
-  panes: [
-    {
-      id: INITIAL_PANE_ID,
-      tabIds: ['__launcher__'],
-      activeTabId: '__launcher__',
-      widthRatio: 1,
-    },
-  ],
-  activePaneId: INITIAL_PANE_ID,
-  activeTabId: '__launcher__',
+  ...(initialSession || {
+    tabs: bootstrapConfig ? [{ kind: 'launcher' as const, id: '__launcher__' as const, name: 'Launcher' as const }] : [],
+    panes: [{ id: INITIAL_PANE_ID, tabIds: bootstrapConfig ? ['__launcher__'] : [], activeTabId: bootstrapConfig ? '__launcher__' : '', widthRatio: 1 }],
+    activePaneId: INITIAL_PANE_ID,
+    activeTabId: bootstrapConfig ? '__launcher__' : '',
+  }),
   notebookMode: 'command',
   clipboardCell: null,
   deletedCellStack: [],
@@ -262,20 +263,30 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   initialize: async () => {
     if (get().initialized || initializing) return;
     initializing = true;
+    preloadWorkspaceEditors(get().workspaceRoot);
     wsClient.connect();
     wsClient.subscribe((msg) => get().handleWSMessage(msg));
+    const startupPanes = get().panes;
 
     try {
-      const cfg = await api.getConfig();
+      const [cfg, listing] = await Promise.all([api.getConfig(), api.listDir('', false)]);
+      persistAppearance(cfg);
       const localTheme = window.localStorage.getItem('saturno_theme');
       const resolvedTheme = normalizeThemeId(localTheme || cfg.theme);
       document.documentElement.setAttribute('data-theme', resolvedTheme);
+      window.localStorage.setItem('saturno_theme', resolvedTheme);
 
       const fontSize = cfg.editor_font_size || get().editorFontSize || 14;
       document.documentElement.style.setProperty('--sat-editor-font-size', `${fontSize}px`);
 
-      const listing = await api.listDir('', false);
+      const sessionShell = initialWorkspaceSession(listing.workspace_root);
+      const navigatedDuringStartup = get().panes !== startupPanes;
       set({
+        ...(navigatedDuringStartup ? {} : sessionShell || (get().tabs.length ? {} : {
+          tabs: [{ kind: 'launcher' as const, id: '__launcher__' as const, name: 'Launcher' as const }],
+          panes: [{ id: INITIAL_PANE_ID, tabIds: ['__launcher__'], activeTabId: '__launcher__', widthRatio: 1 }],
+          activePaneId: INITIAL_PANE_ID, activeTabId: '__launcher__',
+        })),
         initialized: true,
         config: { ...cfg, theme: resolvedTheme },
         notebookLayout: cfg.notebook_layout || get().notebookLayout,
@@ -314,7 +325,17 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         });
       }
 
-      // Auto-open welcome notebook on initial load if present
+      const initialPanes = get().panes;
+      const restored = await restoreWorkspaceSession(listing.workspace_root, cfg.output_display === 'collapsed');
+      sessionPersistenceReady = true;
+      // A user may open a tab or switch workspaces while reads are pending.
+      if (get().workspaceRoot !== listing.workspace_root) return;
+      if (restored) {
+        set(!navigatedDuringStartup && get().panes === initialPanes ? restored : { ...restored, ...reconcileRestoredSession(get(), restored) });
+        return;
+      }
+
+      // Auto-open welcome only when there is no previous session.
       const welcome = listing.items.find(
         (i) => i.type === 'notebook' && i.name.toLowerCase().includes('bem_vindo')
       );
@@ -325,6 +346,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       set({ initialized: true, statusMessage: `Erro ao inicializar: ${err.message}` });
     } finally {
       initializing = false;
+      if (sessionPersistenceReady) saveWorkspaceSession(get());
     }
   },
 
@@ -339,6 +361,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       );
     }
     const updated = await api.updateConfig(patch);
+    persistAppearance(updated);
     const resolvedTheme = normalizeThemeId(updated.theme || patch.theme);
     document.documentElement.setAttribute('data-theme', resolvedTheme);
     set((s) => ({
@@ -594,30 +617,46 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   switchWorkspace: async (newPath) => {
-    const res = await api.switchWorkspace(newPath);
-    saveExpandedFolders({});
-    set({
-      workspaceRoot: res.workspace_root,
-      currentDir: '',
-      files: res.listing.items,
-      expandedFolders: {},
-      folderChildren: {},
-      tabs: [{ kind: 'launcher', id: '__launcher__', name: 'Launcher' }],
-      panes: [
-        {
-          id: INITIAL_PANE_ID,
-          tabIds: ['__launcher__'],
-          activeTabId: '__launcher__',
-          widthRatio: 1,
-        },
-      ],
-      activePaneId: INITIAL_PANE_ID,
-      activeTabId: '__launcher__',
-      selectedFilePaths: [],
-      activeFolderContext: '',
-      showFolderModal: false,
-      statusMessage: `Conectado em ${res.workspace_root}`,
-    });
+    if (restoringSession) return;
+    if (hasUnsavedChanges(get().tabs) && !window.confirm('Há alterações não salvas. Trocar de pasta e descartá-las?')) return;
+    saveWorkspaceSession(get());
+    restoringSession = true;
+    try {
+      const res = await api.switchWorkspace(newPath);
+      saveExpandedFolders({});
+      set({
+        workspaceRoot: res.workspace_root,
+        currentDir: '',
+        files: res.listing.items,
+        expandedFolders: {},
+        folderChildren: {},
+        tabs: [{ kind: 'launcher', id: '__launcher__', name: 'Launcher' }],
+        panes: [
+          {
+            id: INITIAL_PANE_ID,
+            tabIds: ['__launcher__'],
+            activeTabId: '__launcher__',
+            widthRatio: 1,
+          },
+        ],
+        activePaneId: INITIAL_PANE_ID,
+        activeTabId: '__launcher__',
+        selectedFilePaths: [],
+        activeFolderContext: '',
+        showFolderModal: false,
+        statusMessage: `Conectado em ${res.workspace_root}`,
+        ...initialWorkspaceSession(res.workspace_root),
+      });
+      const initialPanes = get().panes;
+      const restored = await restoreWorkspaceSession(res.workspace_root, get().config?.output_display === 'collapsed');
+      sessionPersistenceReady = true;
+      if (restored && get().workspaceRoot === res.workspace_root) {
+        set(get().panes === initialPanes ? restored : { ...restored, ...reconcileRestoredSession(get(), restored) });
+      }
+    } finally {
+      restoringSession = false;
+      saveWorkspaceSession(get());
+    }
   },
 
   openEntry: async (entry, options) => {
@@ -640,7 +679,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       return;
     }
 
-    const fileData = await api.readFile(entry.path);
+    const [fileData] = await Promise.all([api.readFile(entry.path), loadTextFileView()]);
     const cleanContent = (fileData.content || '').replace(/\r\n/g, '\n');
     const newTab: WorkspaceTab = {
       kind: 'file',
@@ -694,7 +733,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
 
     set({ statusMessage: `Abrindo ${relPath.split('/').pop()}…` });
     let nb;
-    try { nb = await api.readNotebook(relPath); }
+    try { [nb] = await Promise.all([api.readNotebook(relPath), loadNotebookView()]); }
     catch (error) { set({ statusMessage: `Erro ao abrir notebook: ${String(error)}` }); throw error; }
     const cells: NotebookCellData[] = nb.cells.map((c: any) => {
       const cleanSrc = (c.source || '').replace(/\r\n/g, '\n');
@@ -1208,22 +1247,25 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   saveTabById: async (tabId) => {
+    const workspaceRoot = get().workspaceRoot;
     const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab) return;
+    if (!tab || (tab.kind !== 'launcher' && tab.loading)) return;
     if (tab.kind === 'notebook') {
       await api.saveNotebook(tab.path, tab.cells, tab.metadata);
+      if (get().workspaceRoot !== workspaceRoot) return;
       set((s) => ({
         tabs: s.tabs.map((t) =>
-          t.id === tab.id && t.kind === 'notebook' ? { ...t, dirty: false } : t
+          t.id === tab.id && t.kind === 'notebook' && t.cells === tab.cells && t.metadata === tab.metadata ? { ...t, dirty: false } : t
         ),
         statusMessage: `Salvo: ${tab.name}`,
       }));
       get().refreshFiles();
     } else if (tab.kind === 'file') {
       await api.saveFile(tab.path, tab.content);
+      if (get().workspaceRoot !== workspaceRoot) return;
       set((s) => ({
         tabs: s.tabs.map((t) =>
-          t.id === tab.id && t.kind === 'file' ? { ...t, dirty: false } : t
+          t.id === tab.id && t.kind === 'file' && t.content === tab.content ? { ...t, dirty: false } : t
         ),
         statusMessage: `Arquivo salvo: ${tab.name}`,
       }));
@@ -1883,6 +1925,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   handleWSMessage: (msg) => {
+    if (get().tabs.some(tab => tab.kind === 'notebook' && tab.path === msg.notebook_path && tab.loading)) return;
     const type = msg.type;
 
     if (type === 'kernel_status') {
@@ -2047,3 +2090,24 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     }
   },
 }));
+
+// Register independently of React mounts; native dialogs also cover reload and
+// browser-tab closure. The browser supplies the confirmation wording.
+const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+  if (!hasUnsavedChanges(useSaturnoStore.getState().tabs)) return;
+  event.preventDefault();
+  event.returnValue = '';
+};
+let unloadWarningEnabled = false;
+useSaturnoStore.subscribe((state, previous) => {
+  const dirty = hasUnsavedChanges(state.tabs);
+  if (dirty !== unloadWarningEnabled) {
+    unloadWarningEnabled = dirty;
+    if (dirty) window.addEventListener('beforeunload', warnBeforeUnload);
+    else window.removeEventListener('beforeunload', warnBeforeUnload);
+  }
+  if (sessionPersistenceReady && !initializing && !restoringSession && state.initialized &&
+      (state.tabs !== previous.tabs || state.panes !== previous.panes || state.activePaneId !== previous.activePaneId)) {
+    saveWorkspaceSession(state);
+  }
+});

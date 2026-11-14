@@ -1,5 +1,5 @@
 import { useShallow } from 'zustand/react/shallow';
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import {
   FastForward,
   Plus,
@@ -14,9 +14,10 @@ import { NotebookCell } from './NotebookCell';
 interface Props {
   tab: OpenNotebookTab;
   isActivePane?: boolean;
+  isVisible?: boolean;
 }
 
-export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = true }) => {
+export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = true, isVisible = true }) => {
   const {
     notebookMode,
     notebookLayout,
@@ -41,7 +42,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     restartKernel,
     openInlineAI,
   } = useSaturnoStore(useShallow((s) => ({
-    notebookMode: s.notebookMode,
+    notebookMode: isActivePane ? s.notebookMode : 'command',
     notebookLayout: s.notebookLayout,
     scrollSignal: s.scrollSignal,
     saveTabById: s.saveTabById,
@@ -66,15 +67,20 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   })));
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const handledScrollRef = useRef(scrollSignal);
   const lastChordRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
 
-  const hiddenCells = hiddenSectionCells(tab.cells);
-  const visibleCells = tab.cells.filter(c => !hiddenCells.has(c.id));
+  const visibleCells = useMemo(() => {
+    const hiddenCells = hiddenSectionCells(tab.cells);
+    return hiddenCells.size ? tab.cells.filter(c => !hiddenCells.has(c.id)) : tab.cells;
+  }, [tab.cells]);
   const activeCell = tab.cells.find((c) => c.id === tab.activeCellId);
 
   // Auto-scroll to cell or cell result when executed / navigated
   useEffect(() => {
-    if (!scrollSignal || scrollSignal.notebookPath !== tab.path) return;
+    if (handledScrollRef.current === scrollSignal) return;
+    handledScrollRef.current = scrollSignal;
+    if (!isVisible || !scrollSignal || scrollSignal.notebookPath !== tab.path) return;
     const container = scrollContainerRef.current;
     if (!container) return;
 
@@ -123,7 +129,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     });
 
     return () => window.cancelAnimationFrame(timer);
-  }, [scrollSignal, tab.path]);
+  }, [scrollSignal, tab.path, isVisible]);
 
   useEffect(() => {
     if (!isActivePane) return;
@@ -410,7 +416,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
             <NotebookCell
               key={cell.id}
               cell={cell}
-              isActive={cell.id === tab.activeCellId}
+              isActive={isActivePane && cell.id === tab.activeCellId}
             />
           ))}
 

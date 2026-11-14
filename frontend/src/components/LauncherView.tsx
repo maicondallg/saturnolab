@@ -31,7 +31,7 @@ export const LauncherView: React.FC = React.memo(() => {
           style={{ borderColor: 'var(--sat-border)' }}
         >
           <h1 className="text-lg font-semibold m-0">SaturnoLab</h1>
-          <p className="text-xs m-0 font-mono" style={{ color: 'var(--sat-text-muted)' }}>
+          <p className="text-xs m-0 font-mono min-h-4" style={{ color: 'var(--sat-text-muted)' }}>
             {workspaceRoot}
           </p>
         </div>

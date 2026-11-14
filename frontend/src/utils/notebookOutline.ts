@@ -1,15 +1,31 @@
 import { marked, Tokens } from 'marked';
 import { NotebookCellData } from '../types/notebook';
 
+// Cell objects retain their identity when another cell changes. Weak keys let
+// closed notebooks be collected without retaining their Markdown sources.
+const headingCache = new WeakMap<NotebookCellData, { source: string; headings: { ordinal: number; level: number; title: string }[] }>();
+
 export function notebookOutline(cells: NotebookCellData[]) {
-  return cells.flatMap((cell, index) => cell.cell_type !== 'markdown' ? [] :
-    marked.lexer(cell.source).filter((token): token is Tokens.Heading => token.type === 'heading').map((token, ordinal) => ({
-      cellId: cell.id, index, ordinal, level: token.depth as number,
-      title: token.text.replace(/[*_`]/g, ''),
-    })));
+  return cells.flatMap((cell, index) => {
+    if (cell.cell_type !== 'markdown') return [];
+    let cached = headingCache.get(cell);
+    if (!cached || cached.source !== cell.source) {
+      cached = {
+        source: cell.source,
+        headings: marked.lexer(cell.source)
+          .filter((token): token is Tokens.Heading => token.type === 'heading')
+          .map((token, ordinal) => ({
+            ordinal, level: token.depth, title: token.text.replace(/[*_`]/g, ''),
+          })),
+      };
+      headingCache.set(cell, cached);
+    }
+    return cached.headings.map(heading => ({ ...heading, cellId: cell.id, index }));
+  });
 }
 
 export function hiddenSectionCells(cells: NotebookCellData[]) {
+  if (!cells.some(cell => cell.sectionCollapsed)) return new Set<string>();
   const headings = notebookOutline(cells);
   const hidden = new Set<string>();
   for (const heading of headings) {

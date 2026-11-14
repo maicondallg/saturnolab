@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Annotation, EditorState, Compartment } from '@codemirror/state';
 import {
   EditorView,
@@ -154,8 +154,8 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   const lastValueRef = useRef<string>((value || '').replace(/\r\n/g, '\n'));
 
   const langCompartment = useRef(new Compartment());
-  const themeCompartment = useRef(new Compartment());
   const lineNumCompartment = useRef(new Compartment());
+  const appliedOptions = useRef({ language, showLineNumbers });
 
   const cbRef = useRef({
     onChange,
@@ -186,11 +186,20 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     onTriggerAI,
   };
 
-  // Keep a lightweight source preview until an editor approaches the viewport.
-  // Once mounted, retain it so scrolling never loses selection or undo history.
-  useEffect(() => {
+  // Resolve initial visibility before paint, so visible cells never show the
+  // unhighlighted offscreen placeholder. Keep far-away editors lazy.
+  useLayoutEffect(() => {
     if (ready || !containerRef.current) return;
     if (autoFocus || typeof IntersectionObserver === 'undefined') {
+      setReady(true);
+      return;
+    }
+    const container = containerRef.current;
+    const scrollRoot = container.closest('[data-notebook-scroll]');
+    const bounds = container.getBoundingClientRect();
+    const viewport = scrollRoot?.getBoundingClientRect();
+    if (container.getClientRects().length && bounds.bottom >= (viewport?.top ?? 0) - 400
+        && bounds.top <= (viewport?.bottom ?? window.innerHeight) + 400) {
       setReady(true);
       return;
     }
@@ -204,11 +213,12 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     return () => observer.disconnect();
   }, [ready, autoFocus]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!ready || !containerRef.current) return;
 
     const initialNormalized = (value || '').replace(/\r\n/g, '\n');
     lastValueRef.current = initialNormalized;
+    appliedOptions.current = { language, showLineNumbers };
 
     const triggerAIHandler = (view: EditorView) => {
       if (!cbRef.current.onTriggerAI) return false;
@@ -331,7 +341,6 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         syntaxHighlighting(saturnoHighlightStyle, { fallback: true }),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         langCompartment.current.of(language === 'python' ? python() : markdown()),
-        themeCompartment.current.of([]),
         lineNumCompartment.current.of(showLineNumbers ? lineNumbers() : []),
         placeholder ? cmPlaceholder(placeholder) : [],
         EditorView.lineWrapping,
@@ -359,9 +368,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     });
     viewRef.current = view;
 
-    if (autoFocus) {
-      setTimeout(() => view.focus(), 10);
-    }
+    if (autoFocus) view.focus();
 
     return () => {
       view.destroy();
@@ -374,11 +381,11 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     const view = viewRef.current;
     if (!view) return;
     const normalizedIncoming = (value || '').replace(/\r\n/g, '\n');
-    const currentDoc = view.state.doc.toString();
-    if (normalizedIncoming !== currentDoc) {
+    // Local edits already updated this ref; avoid serializing the document again.
+    if (normalizedIncoming !== lastValueRef.current) {
       lastValueRef.current = normalizedIncoming;
       view.dispatch({
-        changes: { from: 0, to: currentDoc.length, insert: normalizedIncoming },
+        changes: { from: 0, to: view.state.doc.length, insert: normalizedIncoming },
         annotations: externalSyncAnnotation.of(true),
       });
     }
@@ -386,7 +393,8 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
 
   useEffect(() => {
     const view = viewRef.current;
-    if (!view) return;
+    if (!view || appliedOptions.current.language === language) return;
+    appliedOptions.current.language = language;
     view.dispatch({
       effects: langCompartment.current.reconfigure(
         language === 'python' ? python() : markdown()
@@ -396,15 +404,8 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
 
   useEffect(() => {
     const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      effects: themeCompartment.current.reconfigure([]),
-    });
-  }, [theme]);
-
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
+    if (!view || appliedOptions.current.showLineNumbers === showLineNumbers) return;
+    appliedOptions.current.showLineNumbers = showLineNumbers;
     view.dispatch({
       effects: lineNumCompartment.current.reconfigure(
         showLineNumbers ? lineNumbers() : []
@@ -424,7 +425,16 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       className={`saturno-cm-wrapper w-full ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
       onClick={!ready ? (e) => { e.stopPropagation(); setReady(true); cbRef.current.onFocus?.(); } : undefined}
     >
-      {!ready && <pre className="editor-source-preview" style={{ paddingLeft: showLineNumbers ? 48 : 8 }}>{value || placeholder || ' '}</pre>}
+      {!ready && (
+        <pre className={`editor-source-preview ${showLineNumbers ? 'has-line-numbers' : ''}`}>
+          {(value || placeholder || ' ').split('\n').map((line, index) => (
+            <span className="editor-preview-line" key={index}>
+              {showLineNumbers && <span className="editor-preview-number" aria-hidden="true">{index + 1}</span>}
+              <span className="editor-preview-source">{line || ' '}</span>
+            </span>
+          ))}
+        </pre>
+      )}
     </div>
   );
 };

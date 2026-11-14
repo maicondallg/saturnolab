@@ -91,8 +91,7 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
       ? 'var(--sat-edit-bar)'
       : 'var(--sat-cmd-bar)';
 
-  const hasOutput =
-    cell.cell_type === 'code' && (cell.outputs.length > 0 || cell.isRunning);
+  const hasOutput = cell.cell_type === 'code' && cell.outputs.length > 0;
   const isShortEditor = cell.source.split('\n').length <= 3;
 
   const outputControls = hasOutput ? (

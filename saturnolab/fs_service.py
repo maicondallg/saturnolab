@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -36,21 +37,22 @@ def _scan_dir_entries(
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     try:
-        entries = sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+        # DirEntry caches file metadata; filter ignored entries before any stat.
+        with os.scandir(target) as scan:
+            entries = [entry for entry in scan
+                       if entry.name not in IGNORED_NAMES and not entry.name.startswith(".DS_Store")]
     except OSError:
         return items
 
     for entry in entries:
-        if entry.name in IGNORED_NAMES or entry.name.startswith(".DS_Store"):
-            continue
         try:
             stat = entry.stat()
             is_dir = entry.is_dir()
-            ext = entry.suffix.lower() if not is_dir else ""
+            ext = Path(entry.name).suffix.lower() if not is_dir else ""
             item_type = "directory" if is_dir else ("notebook" if ext == ".ipynb" else "file")
             item_dict: dict[str, Any] = {
                 "name": entry.name,
-                "path": str(entry.relative_to(root_resolved)).replace("\\", "/"),
+                "path": str(Path(entry.path).relative_to(root_resolved)).replace("\\", "/"),
                 "type": item_type,
                 "extension": ext,
                 "size": 0 if is_dir else stat.st_size,
@@ -58,13 +60,14 @@ def _scan_dir_entries(
             }
             if is_dir and recursive and depth < max_depth:
                 item_dict["children"] = _scan_dir_entries(
-                    root_resolved, entry, recursive=True, depth=depth + 1, max_depth=max_depth
+                    root_resolved, Path(entry.path), recursive=True, depth=depth + 1, max_depth=max_depth
                 )
             elif is_dir:
                 item_dict["children"] = []
             items.append(item_dict)
         except OSError:
             continue
+    items.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
     return items
 
 

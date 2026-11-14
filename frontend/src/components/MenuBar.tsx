@@ -5,9 +5,9 @@ import { useSaturnoStore } from '../store/useSaturnoStore';
 
 export const MenuBar: React.FC = React.memo(() => {
   const s = useSaturnoStore(useShallow(s => ({
-    workspaceRoot: s.workspaceRoot, leftSidebar: s.leftSidebar, sidebarPosition: s.sidebarPosition,
+    initialized: s.initialized, workspaceRoot: s.workspaceRoot, leftSidebar: s.leftSidebar, sidebarPosition: s.sidebarPosition,
     notebookLayout: s.notebookLayout, showLineNumbers: s.showLineNumbers,
-    activeTab: s.tabs.find(t => t.id === s.activeTabId), activePaneId: s.activePaneId,
+    activeTab: s.tabs.find(t => t.id === s.activeTabId && (t.kind === 'launcher' || !t.loading)), activePaneId: s.activePaneId,
   })));
   const menu = useRef<HTMLDetailsElement>(null);
   const actions = useSaturnoStore.getState();
@@ -101,7 +101,7 @@ export const MenuBar: React.FC = React.memo(() => {
       <span>SaturnoLab</span>
     </span>
     <button className="ml-1.5 flex items-center gap-1.5 px-2 py-1 rounded text-xs min-w-0 hover:bg-[var(--sat-bg-hover)] text-[var(--sat-text-secondary)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer" onClick={() => actions.setShowFolderModal(true)} title={s.workspaceRoot || 'Abrir pasta'}>
-      <FolderOpen size={14} /><span className="truncate max-w-[240px]">{s.workspaceRoot?.split('/').filter(Boolean).pop() || 'Abrir pasta'}</span><ChevronDown size={12} />
+      <FolderOpen size={14} /><span className="truncate max-w-[240px]">{s.workspaceRoot?.split('/').filter(Boolean).pop() || (s.initialized ? 'Abrir pasta' : '\u00a0')}</span><ChevronDown size={12} />
     </button>
 
   </header>;

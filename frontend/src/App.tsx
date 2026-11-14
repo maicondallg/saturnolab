@@ -9,17 +9,50 @@ import { LauncherView } from './components/LauncherView';
 import { FileTypeIcon } from './components/FileTypeIcon';
 import { FileEntry } from './types/notebook';
 
-const NotebookView = lazy(() => import('./components/NotebookView').then((m) => ({ default: m.NotebookView })));
-const TextFileEditor = lazy(() => import('./components/TextFileEditor').then((m) => ({ default: m.TextFileEditor })));
+import { editorViews, loadNotebookView, loadTextFileView } from './services/editorViews';
+
+import { createTabHeaderSelector } from './utils/tabHeaders';
+
+const selectTabHeaders = createTabHeaderSelector();
+
+const LazyNotebookView = lazy(() => loadNotebookView().then(m => ({ default: m.NotebookView })));
+const LazyTextFileEditor = lazy(() => loadTextFileView().then(m => ({ default: m.TextFileEditor })));
 const FolderPickerModal = lazy(() => import('./components/FolderPickerModal').then((m) => ({ default: m.FolderPickerModal })));
 const SettingsModal = lazy(() => import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal })));
+
+// Keep visited tabs mounted until closed, preserving editor history and scroll.
+// Unvisited tabs (e.g. moved into a split pane) do not initialize hidden editors.
+const TabPanel = React.memo(({ tabId, visible, focused }: {
+  tabId: string;
+  visible: boolean;
+  focused: boolean;
+}) => {
+  const retainedTab = useRef(useSaturnoStore.getState().tabs.find(t => t.id === tabId));
+  const tab = useSaturnoStore(s => visible ? s.tabs.find(t => t.id === tabId) : retainedTab.current);
+  retainedTab.current = tab;
+  const [visited, setVisited] = useState(visible);
+  useEffect(() => { if (visible) setVisited(true); }, [visible]);
+  const views = useRef<{ notebook: React.ComponentType<React.ComponentProps<typeof LazyNotebookView>>; file: React.ComponentType<React.ComponentProps<typeof LazyTextFileEditor>> }>();
+  if (!tab || (!visible && !visited) || (tab.kind !== 'launcher' && tab.loading)) return null;
+  views.current ??= { notebook: editorViews.notebook || LazyNotebookView, file: editorViews.file || LazyTextFileEditor };
+  const NotebookView = views.current.notebook;
+  const TextFileEditor = views.current.file;
+  return (
+    <div data-tab-panel={tab.id} hidden={!visible} className="h-full">
+      <Suspense fallback={null}>
+        {tab.kind === 'notebook' && <NotebookView tab={tab} isVisible={visible} isActivePane={visible && focused} />}
+        {tab.kind === 'file' && <TextFileEditor tab={tab} />}
+        {tab.kind === 'launcher' && <LauncherView />}
+      </Suspense>
+    </div>
+  );
+});
 
 export const App: React.FC = () => {
   const {
     showFolderModal,
     showSettingsModal,
     initialize,
-    tabs,
     panes,
     activePaneId,
     sidebarPosition,
@@ -36,7 +69,6 @@ export const App: React.FC = () => {
     showFolderModal: s.showFolderModal,
     showSettingsModal: s.showSettingsModal,
     initialize: s.initialize,
-    tabs: s.tabs,
     panes: s.panes,
     activePaneId: s.activePaneId,
     sidebarPosition: s.sidebarPosition,
@@ -50,6 +82,8 @@ export const App: React.FC = () => {
     openLauncher: s.openLauncher,
     openEntry: s.openEntry,
   })));
+
+  const tabs = useSaturnoStore(selectTabHeaders);
 
   const [dragDropZone, setDragDropZone] = useState<{
     paneId: string;
@@ -164,6 +198,7 @@ export const App: React.FC = () => {
       }
     }
   };
+
 
   return (
     <div className="h-dvh w-full flex flex-col overflow-hidden">
@@ -393,18 +428,9 @@ export const App: React.FC = () => {
 
                   {/* Active Tab Content */}
                   <div className="flex-1 min-h-0 overflow-hidden relative">
-                    <Suspense fallback={<div role="status" className="p-4 text-sm">Carregando…</div>}>
-                      {activeTab?.kind === 'notebook' && (
-                        <NotebookView
-                          tab={activeTab}
-                          isActivePane={isPaneFocused}
-                        />
-                      )}
-                      {activeTab?.kind === 'launcher' && <LauncherView />}
-                      {activeTab?.kind === 'file' && (
-                        <TextFileEditor tab={activeTab} />
-                      )}
-                    </Suspense>
+                    {paneTabs.map(tab => (
+                      <TabPanel key={tab.id} tabId={tab.id} visible={tab.id === activeTab?.id} focused={isPaneFocused} />
+                    ))}
 
                     {/* Visual Drop Zone Overlay when dragging a tab or file */}
                     {dropInfo && (

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { ChevronDown, ChevronRight, ChevronsDownUp, Folder, ListTree, Database, PanelLeftClose, Plus, RefreshCw, X } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
+import { loadNotebookView, loadTextFileView } from '../services/editorViews';
 import { apiFetch } from '../services/api';
 import { FileEntry } from '../types/notebook';
 import { flattenVisibleTree, formatModifiedShort, formatModifiedTooltip } from '../utils/fileUtils';
@@ -14,10 +15,11 @@ let clipboardCut = false;
 const parentOf = (path: string) => path.split('/').slice(0, -1).join('/');
 export const LeftSidebar: React.FC = React.memo(() => {
   const s = useSaturnoStore(useShallow(s => ({
+    initialized: s.initialized,
     panel: s.leftSidebar, position: s.sidebarPosition, width: s.sidebarWidth,
     files: s.files, expanded: s.expandedFolders, children: s.folderChildren,
     selected: s.selectedFilePaths, folder: s.activeFolderContext, showTime: s.showModifiedTime,
-    tab: s.tabs.find(t => t.id === s.activeTabId),
+    tab: s.leftSidebar === 'outline' || s.leftSidebar === 'variables' ? s.tabs.find(t => t.id === s.activeTabId) : undefined,
   })));
   const a = useSaturnoStore.getState();
   const nodes = useMemo(() => flattenVisibleTree(s.files, s.expanded, s.children), [s.files, s.expanded, s.children]);
@@ -151,9 +153,9 @@ export const LeftSidebar: React.FC = React.memo(() => {
               }
             }
           }}>
-          {!nodes.length && <p className="p-4 text-sm" style={{color:'var(--sat-text-muted)'}}>Pasta vazia. Clique com o botão direito para criar um arquivo.</p>}
+          {s.initialized && !nodes.length && <p className="p-4 text-sm" style={{color:'var(--sat-text-muted)'}}>Pasta vazia. Clique com o botão direito para criar um arquivo.</p>}
           {nodes.map(({entry,depth}) => <div key={entry.path} data-file-path={entry.path} role="treeitem" tabIndex={0} aria-level={depth + 1} aria-selected={s.selected.includes(entry.path)} aria-expanded={entry.type === 'directory' ? !!s.expanded[entry.path] : undefined}
-            onPointerEnter={entry.type === 'notebook' ? () => { void import('./NotebookView').catch(() => {}); } : undefined}
+            onPointerEnter={entry.type !== 'directory' ? () => { void (entry.type === 'notebook' ? loadNotebookView() : loadTextFileView()).catch(() => {}); } : undefined}
             draggable title={formatModifiedTooltip(entry)}
             className={`saturno-file-row h-8 flex items-center gap-2 text-[13px] cursor-pointer ${s.selected.includes(entry.path) ? 'is-selected' : ''} ${dropFolder === entry.path ? 'drop-target' : ''}`}
             style={{paddingLeft:depth*14+10,paddingRight:10}}
