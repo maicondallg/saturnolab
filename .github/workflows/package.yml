@@ -1,0 +1,50 @@
+name: Create Package
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  create-package:
+    name: Build frontend & Python package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install & build frontend into saturnolab/static
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Check package metadata
+        run: uvx twine check dist/*
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: saturnolab-package
+          path: dist/*
