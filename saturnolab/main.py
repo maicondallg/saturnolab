@@ -520,7 +520,11 @@ async def serve_spa(full_path: str):
                 "auto_scroll_on_run", "show_modified_time", "confirm_kernel_restart", "output_display",
             )
             bootstrap = {field: getattr(cfg, field) for field in fields}
-            bootstrap.update(workspace_dir=str(config_manager.get_workspace_path()), providers={})
+            bootstrap.update(
+                workspace_dir=str(config_manager.get_workspace_path()),
+                providers={},
+                table_output=cfg.table_output.model_dump(),
+            )
             payload = json.dumps(bootstrap).replace("<", "\\u003c")
             html = await run_in_threadpool(index_file.read_text, encoding="utf-8")
             html = html.replace("</head>", f"<script>window.__SATURNO_BOOTSTRAP__={payload};</script></head>")

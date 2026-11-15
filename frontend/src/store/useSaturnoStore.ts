@@ -14,8 +14,14 @@ import {
   OpenTextFileTab,
   SaturnoConfig,
   SettingsSection,
+  TableOutputSettings,
   WorkspaceTab,
 } from '../types/notebook';
+import {
+  loadStoredTableOutputSettings,
+  normalizeTableOutputSettings,
+  saveStoredTableOutputSettings,
+} from '../utils/tableConfig';
 
 function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -58,6 +64,7 @@ interface SaturnoStore {
   showModifiedTime: boolean;
   confirmKernelRestart: boolean;
   editorFontSize: number;
+  tableOutputSettings: TableOutputSettings;
 
   // Modals
   showFolderModal: boolean;
@@ -101,6 +108,7 @@ interface SaturnoStore {
   setAutoScrollOnRun: (v: boolean) => void;
   setShowModifiedTime: (v: boolean) => void;
   setConfirmKernelRestart: (v: boolean) => void;
+  setTableOutputSettings: (patch: Partial<TableOutputSettings>) => void;
   setShowFolderModal: (v: boolean) => void;
   setShowAIModal: (v: boolean) => void;
   setShowShortcutsModal: (v: boolean) => void;
@@ -234,6 +242,9 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   showModifiedTime: bootstrapConfig?.show_modified_time ?? true,
   confirmKernelRestart: false,
   editorFontSize: bootstrapConfig?.editor_font_size || Number(window.localStorage.getItem('saturno_font_size')) || 14,
+  tableOutputSettings: bootstrapConfig?.table_output
+    ? normalizeTableOutputSettings(bootstrapConfig.table_output)
+    : loadStoredTableOutputSettings(),
 
   showFolderModal: false,
   showAIModal: false,
@@ -297,6 +308,9 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         showModifiedTime: cfg.show_modified_time ?? true,
         confirmKernelRestart: cfg.confirm_kernel_restart ?? false,
         editorFontSize: fontSize,
+        tableOutputSettings: cfg.table_output
+          ? normalizeTableOutputSettings(cfg.table_output)
+          : get().tableOutputSettings,
         workspaceRoot: listing.workspace_root,
         currentDir: listing.current_path,
         files: listing.items,
@@ -374,6 +388,9 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       showModifiedTime: updated.show_modified_time ?? s.showModifiedTime,
       confirmKernelRestart: updated.confirm_kernel_restart ?? s.confirmKernelRestart,
       editorFontSize: updated.editor_font_size || s.editorFontSize,
+      tableOutputSettings: updated.table_output
+        ? normalizeTableOutputSettings(updated.table_output)
+        : s.tableOutputSettings,
       statusMessage: 'Configurações salvas',
     }));
   },
@@ -454,6 +471,13 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   setConfirmKernelRestart: (v) => {
     set({ confirmKernelRestart: v });
     api.updateConfig({ confirm_kernel_restart: v }).catch(() => {});
+  },
+
+  setTableOutputSettings: (patch) => {
+    const next = normalizeTableOutputSettings({ ...get().tableOutputSettings, ...patch });
+    saveStoredTableOutputSettings(next);
+    set({ tableOutputSettings: next });
+    api.updateConfig({ table_output: next }).catch(() => {});
   },
 
   setShowFolderModal: (v) => set({ showFolderModal: v }),

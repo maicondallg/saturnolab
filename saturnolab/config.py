@@ -33,6 +33,18 @@ class ProviderSettings(BaseModel):
     reasoning_effort: str = "low"
 
 
+class TableOutputSettings(BaseModel):
+    wrap: str = "nowrap"  # nowrap | wrap
+    density: str = "normal"  # compact | normal | comfortable
+    font_size: int = 13  # 12 | 13 | 14
+    max_col_width: int = 280  # 180 | 280 | 420 | 0 (unlimited)
+    align: str = "auto"  # auto | left | right
+    height: str = "limited"  # limited | full
+    sticky_headers: bool = True
+    highlight_types: bool = True
+    show_grid: bool = True
+
+
 class SaturnoConfig(BaseModel):
     active_provider: str = "gemini"  # gemini | codex | openai_compatible | anthropic
     theme: str = "graphite"
@@ -47,6 +59,7 @@ class SaturnoConfig(BaseModel):
     show_modified_time: bool = True
     confirm_kernel_restart: bool = False
     editor_font_size: int = 14
+    table_output: TableOutputSettings = Field(default_factory=TableOutputSettings)
     providers: dict[str, ProviderSettings] = Field(
         default_factory=lambda: {
             "gemini": ProviderSettings(
@@ -168,6 +181,27 @@ class ConfigManager:
             self._config.confirm_kernel_restart = bool(patch["confirm_kernel_restart"])
         if "editor_font_size" in patch and isinstance(patch["editor_font_size"], (int, float)):
             self._config.editor_font_size = max(11, min(22, int(patch["editor_font_size"])))
+        if "table_output" in patch and isinstance(patch["table_output"], dict):
+            tbl = patch["table_output"]
+            cur = self._config.table_output
+            if tbl.get("wrap") in ("nowrap", "wrap"):
+                cur.wrap = tbl["wrap"]
+            if tbl.get("density") in ("compact", "normal", "comfortable"):
+                cur.density = tbl["density"]
+            if isinstance(tbl.get("font_size"), (int, float)):
+                cur.font_size = max(11, min(16, int(tbl["font_size"])))
+            if isinstance(tbl.get("max_col_width"), (int, float)):
+                cur.max_col_width = max(0, min(1200, int(tbl["max_col_width"])))
+            if tbl.get("align") in ("auto", "left", "right"):
+                cur.align = tbl["align"]
+            if tbl.get("height") in ("limited", "full"):
+                cur.height = tbl["height"]
+            if "sticky_headers" in tbl:
+                cur.sticky_headers = bool(tbl["sticky_headers"])
+            if "highlight_types" in tbl:
+                cur.highlight_types = bool(tbl["highlight_types"])
+            if "show_grid" in tbl:
+                cur.show_grid = bool(tbl["show_grid"])
         if "providers" in patch and isinstance(patch["providers"], dict):
             for prov_name, prov_data in patch["providers"].items():
                 if not isinstance(prov_data, dict):

@@ -1,4 +1,5 @@
 import { SaturnoConfig } from '../types/notebook';
+import { normalizeTableOutputSettings, saveStoredTableOutputSettings } from '../utils/tableConfig';
 
 // The bundled page includes appearance and workspace identity, never API keys.
 export const bootstrapConfig = (window as Window & {
@@ -15,6 +16,9 @@ export function persistAppearance(config: SaturnoConfig) {
     };
     for (const [key, value] of Object.entries(values)) {
       if (value !== undefined) localStorage.setItem(key, String(value));
+    }
+    if (config.table_output) {
+      saveStoredTableOutputSettings(normalizeTableOutputSettings(config.table_output));
     }
   } catch { /* Appearance still works when storage is unavailable. */ }
 }

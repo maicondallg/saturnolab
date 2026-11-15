@@ -49,6 +49,18 @@ export interface ProviderConfig {
   has_key?: boolean;
 }
 
+export interface TableOutputSettings {
+  wrap: 'nowrap' | 'wrap';
+  density: 'compact' | 'normal' | 'comfortable';
+  font_size: number;
+  max_col_width: number;
+  align: 'auto' | 'left' | 'right';
+  height: 'limited' | 'full';
+  sticky_headers: boolean;
+  highlight_types: boolean;
+  show_grid: boolean;
+}
+
 export interface SaturnoConfig {
   workspace_dir: string;
   active_provider: 'gemini' | 'codex' | 'openai_compatible' | 'anthropic';
@@ -64,6 +76,7 @@ export interface SaturnoConfig {
   show_modified_time?: boolean;
   confirm_kernel_restart?: boolean;
   editor_font_size?: number;
+  table_output?: Partial<TableOutputSettings>;
   providers: Record<string, ProviderConfig>;
   codex_status?: {
     cli_installed: boolean;

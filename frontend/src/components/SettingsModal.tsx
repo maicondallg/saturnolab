@@ -9,14 +9,17 @@ import {
   Palette,
   PanelLeft,
   PanelRight,
+  RotateCcw,
   Settings,
   Sliders,
   Sparkles,
+  Table2,
   X,
 } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 import { SATURNO_THEMES, normalizeThemeId } from '../themes';
 import { SettingsSection } from '../types/notebook';
+import { DEFAULT_TABLE_OUTPUT_SETTINGS } from '../utils/tableConfig';
 
 export const SettingsModal: React.FC = React.memo(() => {
   const {
@@ -43,6 +46,8 @@ export const SettingsModal: React.FC = React.memo(() => {
     setShowModifiedTime,
     confirmKernelRestart,
     setConfirmKernelRestart,
+    tableOutputSettings,
+    setTableOutputSettings,
   } = useSaturnoStore(useShallow((s) => ({
     showSettingsModal: s.showSettingsModal,
     settingsSection: s.settingsSection,
@@ -67,6 +72,8 @@ export const SettingsModal: React.FC = React.memo(() => {
     setShowModifiedTime: s.setShowModifiedTime,
     confirmKernelRestart: s.confirmKernelRestart,
     setConfirmKernelRestart: s.setConfirmKernelRestart,
+    tableOutputSettings: s.tableOutputSettings,
+    setTableOutputSettings: s.setTableOutputSettings,
   })));
 
   const activeProvider = config?.active_provider || 'gemini';
@@ -651,6 +658,174 @@ export const SettingsModal: React.FC = React.memo(() => {
                     className="w-4 h-4 mt-0.5 shrink-0 cursor-pointer"
                   />
                 </label>
+
+                <div
+                  className="p-3.5 rounded-[4px] border space-y-3"
+                  style={{
+                    backgroundColor: 'var(--sat-bg-subtle)',
+                    borderColor: 'var(--sat-border)',
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Table2 size={15} style={{ color: 'var(--sat-accent)' }} />
+                      <div>
+                        <div className="font-semibold text-xs">
+                          Formatação Padrão de Tabelas (Pandas / Polars)
+                        </div>
+                        <div className="text-[11px]" style={{ color: 'var(--sat-text-muted)' }}>
+                          Você também pode ajustar cada tabela individualmente pelo ícone no canto superior direito.
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setTableOutputSettings(DEFAULT_TABLE_OUTPUT_SETTINGS)}
+                      className="text-[11px] px-2 py-0.5 rounded-[2px] border inline-flex items-center gap-1 cursor-pointer hover:opacity-80 shrink-0"
+                      style={{ borderColor: 'var(--sat-border)' }}
+                    >
+                      <RotateCcw size={11} />
+                      <span>Padrão</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11.5px]">
+                    <label className="flex items-center justify-between gap-2">
+                      <span style={{ color: 'var(--sat-text-secondary)' }}>Quebra de texto</span>
+                      <select
+                        value={tableOutputSettings.wrap}
+                        onChange={(e) =>
+                          setTableOutputSettings({ wrap: e.target.value as 'nowrap' | 'wrap' })
+                        }
+                        style={{ background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }}
+                        className="border rounded-[3px] px-2 py-1 text-xs"
+                      >
+                        <option value="nowrap">Linha única (scroll horizontal)</option>
+                        <option value="wrap">Quebrar texto</option>
+                      </select>
+                    </label>
+
+                    <label className="flex items-center justify-between gap-2">
+                      <span style={{ color: 'var(--sat-text-secondary)' }}>Densidade</span>
+                      <select
+                        value={tableOutputSettings.density}
+                        onChange={(e) =>
+                          setTableOutputSettings({
+                            density: e.target.value as 'compact' | 'normal' | 'comfortable',
+                          })
+                        }
+                        style={{ background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }}
+                        className="border rounded-[3px] px-2 py-1 text-xs"
+                      >
+                        <option value="compact">Compacta</option>
+                        <option value="normal">Padrão</option>
+                        <option value="comfortable">Confortável</option>
+                      </select>
+                    </label>
+
+                    <label className="flex items-center justify-between gap-2">
+                      <span style={{ color: 'var(--sat-text-secondary)' }}>Alinhamento</span>
+                      <select
+                        value={tableOutputSettings.align}
+                        onChange={(e) =>
+                          setTableOutputSettings({
+                            align: e.target.value as 'auto' | 'left' | 'right',
+                          })
+                        }
+                        style={{ background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }}
+                        className="border rounded-[3px] px-2 py-1 text-xs"
+                      >
+                        <option value="auto">Automático (Números → / Texto ←)</option>
+                        <option value="left">Esquerda</option>
+                        <option value="right">Direita</option>
+                      </select>
+                    </label>
+
+                    <label className="flex items-center justify-between gap-2">
+                      <span style={{ color: 'var(--sat-text-secondary)' }}>Largura máx. coluna</span>
+                      <select
+                        value={tableOutputSettings.max_col_width}
+                        onChange={(e) =>
+                          setTableOutputSettings({ max_col_width: Number(e.target.value) })
+                        }
+                        style={{ background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }}
+                        className="border rounded-[3px] px-2 py-1 text-xs"
+                      >
+                        <option value={180}>180px</option>
+                        <option value={280}>280px</option>
+                        <option value={420}>420px</option>
+                        <option value={0}>Sem limite</option>
+                      </select>
+                    </label>
+
+                    <label className="flex items-center justify-between gap-2">
+                      <span style={{ color: 'var(--sat-text-secondary)' }}>Tamanho da fonte</span>
+                      <select
+                        value={tableOutputSettings.font_size}
+                        onChange={(e) =>
+                          setTableOutputSettings({ font_size: Number(e.target.value) })
+                        }
+                        style={{ background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }}
+                        className="border rounded-[3px] px-2 py-1 text-xs"
+                      >
+                        <option value={12}>12px</option>
+                        <option value={13}>13px</option>
+                        <option value={14}>14px</option>
+                      </select>
+                    </label>
+
+                    <label className="flex items-center justify-between gap-2">
+                      <span style={{ color: 'var(--sat-text-secondary)' }}>Altura padrão</span>
+                      <select
+                        value={tableOutputSettings.height}
+                        onChange={(e) =>
+                          setTableOutputSettings({ height: e.target.value as 'limited' | 'full' })
+                        }
+                        style={{ background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }}
+                        className="border rounded-[3px] px-2 py-1 text-xs"
+                      >
+                        <option value="limited">Limitada (400px)</option>
+                        <option value="full">Completa</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="flex flex-wrap gap-x-5 gap-y-1.5 pt-1 text-[11.5px]">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={tableOutputSettings.sticky_headers}
+                        onChange={(e) =>
+                          setTableOutputSettings({ sticky_headers: e.target.checked })
+                        }
+                        className="cursor-pointer"
+                      />
+                      <span>Fixar cabeçalho e índice</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={tableOutputSettings.highlight_types}
+                        onChange={(e) =>
+                          setTableOutputSettings({ highlight_types: e.target.checked })
+                        }
+                        className="cursor-pointer"
+                      />
+                      <span>Destacar nulos e números</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={tableOutputSettings.show_grid}
+                        onChange={(e) =>
+                          setTableOutputSettings({ show_grid: e.target.checked })
+                        }
+                        className="cursor-pointer"
+                      />
+                      <span>Divisórias verticais</span>
+                    </label>
+                  </div>
+                </div>
 
                 <div
                   className="p-3.5 rounded-[4px] border flex items-start gap-3"

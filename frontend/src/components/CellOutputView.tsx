@@ -2,6 +2,7 @@ import React from 'react';
 import DOMPurify from 'dompurify';
 import { Sparkles } from 'lucide-react';
 import { CellOutput } from '../types/notebook';
+import { TableOutputView } from './TableOutputView';
 
 function stripAnsi(str: string): string {
   // eslint-disable-next-line no-control-regex
@@ -11,9 +12,10 @@ function stripAnsi(str: string): string {
 interface Props {
   outputs: CellOutput[];
   onFixErrorWithAI: (errorSummary: string) => void;
+  outputLimited?: boolean;
 }
 
-export const CellOutputView: React.FC<Props> = React.memo(({ outputs, onFixErrorWithAI }) => {
+export const CellOutputView: React.FC<Props> = React.memo(({ outputs, onFixErrorWithAI, outputLimited = false }) => {
   if (!outputs || outputs.length === 0) return null;
 
   return (
@@ -25,7 +27,12 @@ export const CellOutputView: React.FC<Props> = React.memo(({ outputs, onFixError
       }}
     >
       {outputs.map((out, idx) => (
-        <OutputItem key={idx} out={out} onFixErrorWithAI={onFixErrorWithAI} />
+        <OutputItem
+          key={idx}
+          out={out}
+          onFixErrorWithAI={onFixErrorWithAI}
+          outputLimited={outputLimited}
+        />
       ))}
     </div>
   );
@@ -33,9 +40,10 @@ export const CellOutputView: React.FC<Props> = React.memo(({ outputs, onFixError
 
 // Streaming appends preserve earlier output objects, so their HTML/SVG only
 // needs sanitizing once instead of on every subsequent kernel message.
-const OutputItem = React.memo(({ out, onFixErrorWithAI }: {
+const OutputItem = React.memo(({ out, onFixErrorWithAI, outputLimited }: {
   out: CellOutput;
   onFixErrorWithAI: Props['onFixErrorWithAI'];
+  outputLimited: boolean;
 }) => {
   if (out.output_type === 'stream') {
     const isErr = out.name === 'stderr';
@@ -121,11 +129,9 @@ const OutputItem = React.memo(({ out, onFixErrorWithAI }: {
         )}
 
         {data['text/html'] && (
-          <div
-            className="jp-rendered-html"
-            dangerouslySetInnerHTML={{
-              __html: DOMPurify.sanitize(String(data['text/html'])),
-            }}
+          <TableOutputView
+            rawHtml={String(data['text/html'])}
+            outputLimited={outputLimited}
           />
         )}
 

@@ -307,7 +307,11 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
                       tabIndex={outputLimited ? 0 : undefined}
                       aria-label="Conteúdo da saída"
                     >
-                      <CellOutputView outputs={cell.outputs} onFixErrorWithAI={fixErrorWithAI} />
+                      <CellOutputView
+                        outputs={cell.outputs}
+                        onFixErrorWithAI={fixErrorWithAI}
+                        outputLimited={outputLimited}
+                      />
                     </div>
                   )}
                 </div>
