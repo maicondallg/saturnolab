@@ -238,8 +238,9 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     const saturnoKeymap = keymap.of([
       {
         key: 'Shift-Enter',
-        run: () => {
+        run: (view) => {
           if (!cbRef.current.onShiftEnter) return false;
+          view.contentDOM.blur();
           cbRef.current.onShiftEnter();
           return true;
         },
@@ -416,6 +417,8 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   useEffect(() => {
     if (autoFocus && viewRef.current && !viewRef.current.hasFocus) {
       viewRef.current.focus();
+    } else if (autoFocus === false && viewRef.current && viewRef.current.hasFocus) {
+      viewRef.current.contentDOM.blur();
     }
   }, [autoFocus]);
 

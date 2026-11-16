@@ -22,6 +22,7 @@ import {
   normalizeTableOutputSettings,
   saveStoredTableOutputSettings,
 } from '../utils/tableConfig';
+import { hiddenSectionCells } from '../utils/notebookOutline';
 
 function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -1314,6 +1315,15 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   setNotebookMode: (mode) => set({ notebookMode: mode }),
 
   selectCell: (cellId, mode, scrollIntoView = false) => {
+    const nextMode = mode || get().notebookMode;
+    if (
+      nextMode === 'command' &&
+      typeof document !== 'undefined' &&
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement.closest('[data-cell-id] .cm-editor')
+    ) {
+      document.activeElement.blur();
+    }
     set((s) => {
       const activeNb = s.tabs.find(
         (t): t is OpenNotebookTab => t.id === s.activeTabId && t.kind === 'notebook'
@@ -1725,10 +1735,13 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       const inserted = get().addCellBelow(cell.id, 'code');
       if (inserted) get().selectCell(inserted, 'edit');
     } else if (advance === 'next') {
-      if (idx + 1 < tab.cells.length) {
-        get().selectCell(tab.cells[idx + 1].id, 'command');
+      const hidden = hiddenSectionCells(tab.cells);
+      const nextCell = tab.cells.slice(idx + 1).find((c) => !hidden.has(c.id));
+      if (nextCell) {
+        get().selectCell(nextCell.id, 'command', get().autoScrollOnRun);
       } else {
-        const inserted = get().addCellBelow(cell.id, 'code');
+        const lastCellId = tab.cells[tab.cells.length - 1]?.id || cell.id;
+        const inserted = get().addCellBelow(lastCellId, 'code');
         if (inserted) get().selectCell(inserted, 'edit');
       }
     }
