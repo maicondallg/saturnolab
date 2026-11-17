@@ -1,4 +1,10 @@
-import { FileEntry, SaturnoConfig } from '../types/notebook';
+import {
+  FileEntry,
+  KernelCompleteResponse,
+  KernelExpandOutputResponse,
+  KernelInspectResponse,
+  SaturnoConfig,
+} from '../types/notebook';
 
 export async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -53,6 +59,7 @@ export const api = {
       name: string;
       metadata: Record<string, any>;
       cells: any[];
+      modified?: string;
       kernel_status: any;
       variables: any[];
     }>(`/api/fs/notebook?path=${encodeURIComponent(path)}`),
@@ -67,6 +74,7 @@ export const api = {
       name: string;
       metadata: Record<string, any>;
       cells: any[];
+      modified?: string;
     }>('/api/fs/notebook/create', {
       method: 'POST',
       body: JSON.stringify({ folder, name }),
@@ -87,16 +95,16 @@ export const api = {
       { method: 'DELETE' }
     ),
   readFile: (path: string) =>
-    apiFetch<{ path: string; name: string; content: string; truncated: boolean }>(
+    apiFetch<{ path: string; name: string; content: string; truncated: boolean; modified?: string }>(
       `/api/fs/file?path=${encodeURIComponent(path)}`
     ),
   saveFile: (path: string, content: string) =>
-    apiFetch<{ saved: boolean; path: string }>('/api/fs/file/save', {
+    apiFetch<{ saved: boolean; path: string; modified?: string }>('/api/fs/file/save', {
       method: 'POST',
       body: JSON.stringify({ path, content }),
     }),
     createFile: (folder = '', name = 'script.py') =>
-    apiFetch<{ path: string; name: string; content: string; truncated: boolean }>(
+    apiFetch<{ path: string; name: string; content: string; truncated: boolean; modified?: string }>(
       '/api/fs/file/create',
       {
         method: 'POST',
@@ -149,6 +157,46 @@ export const api = {
     apiFetch('/api/kernels/shutdown', {
       method: 'POST',
       body: JSON.stringify({ notebook_path }),
+    }),
+  completeCode: (
+    notebook_path: string,
+    code: string,
+    cursor_pos: number,
+    context_code = '',
+    signal?: AbortSignal
+  ) =>
+    apiFetch<KernelCompleteResponse>('/api/kernels/complete', {
+      method: 'POST',
+      body: JSON.stringify({ notebook_path, code, cursor_pos, context_code }),
+      signal,
+    }),
+  inspectCode: (
+    notebook_path: string,
+    code: string,
+    cursor_pos: number,
+    detail_level = 0,
+    context_code = '',
+    signal?: AbortSignal
+  ) =>
+    apiFetch<KernelInspectResponse>('/api/kernels/inspect', {
+      method: 'POST',
+      body: JSON.stringify({
+        notebook_path,
+        code,
+        cursor_pos,
+        detail_level,
+        context_code,
+      }),
+      signal,
+    }),
+  expandOutput: (
+    notebook_path: string,
+    execution_count: number | null,
+    code = ''
+  ) =>
+    apiFetch<KernelExpandOutputResponse>('/api/kernels/expand-output', {
+      method: 'POST',
+      body: JSON.stringify({ notebook_path, execution_count, code }),
     }),
 };
 

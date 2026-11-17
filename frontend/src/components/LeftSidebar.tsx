@@ -13,9 +13,33 @@ import { FileTypeIcon } from './FileTypeIcon';
 let fileClipboard: string[] = [];
 let clipboardCut = false;
 const parentOf = (path: string) => path.split('/').slice(0, -1).join('/');
+async function copyPathText(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // fallback below
+    }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
 export const LeftSidebar: React.FC = React.memo(() => {
   const s = useSaturnoStore(useShallow(s => ({
     initialized: s.initialized,
+    workspaceRoot: s.workspaceRoot,
     panel: s.leftSidebar, position: s.sidebarPosition, width: s.sidebarWidth,
     files: s.files, expanded: s.expandedFolders, children: s.folderChildren,
     selected: s.selectedFilePaths, folder: s.activeFolderContext, showTime: s.showModifiedTime,
@@ -204,14 +228,34 @@ export const LeftSidebar: React.FC = React.memo(() => {
       <div className={`absolute inset-y-0 w-1.5 cursor-col-resize ${s.position==='left'?'right-0':'left-0'}`} title="Redimensionar painel"
         onMouseDown={e=>{ e.preventDefault(); const start=e.clientX, width=s.width; const move=(event:MouseEvent)=>a.setSidebarWidth(width+(event.clientX-start)*(s.position==='left'?1:-1),false); const end=()=>{a.setSidebarWidth(useSaturnoStore.getState().sidebarWidth,true);window.removeEventListener('mousemove',move);window.removeEventListener('mouseup',end);};window.addEventListener('mousemove',move);window.addEventListener('mouseup',end); }} />
     </aside>}
-    {context && createPortal(<div ref={menuRef} data-app-menu className="file-context-menu" style={{left:context.x+250>window.innerWidth-8?Math.max(8,context.x-250):Math.max(8,context.x),top:context.y+(context.entry?390:200)>window.innerHeight-8?Math.max(8,context.y-(context.entry?390:200)):Math.max(8,context.y)}}>
+    {context && createPortal(<div ref={menuRef} data-app-menu className="file-context-menu" style={{left:context.x+250>window.innerWidth-8?Math.max(8,context.x-250):Math.max(8,context.x),top:context.y+(context.entry?440:230)>window.innerHeight-8?Math.max(8,context.y-(context.entry?440:230)):Math.max(8,context.y)}}>
       {context.entry && <>
         {menuItem('Abrir lado a lado',()=>a.openEntry(context.entry!,{sideBySide:true}),context.entry.type==='directory')}
+        {menuItem('Copiar caminho',async ()=>{
+          const relPath = context.entry!.path;
+          await copyPathText(relPath);
+          useSaturnoStore.setState({statusMessage:`Caminho copiado: ${relPath}`});
+        })}
+        {menuItem('Copiar caminho absoluto',async ()=>{
+          const root = (s.workspaceRoot || '').replace(/\/+$/, '');
+          const absPath = root ? `${root}/${context.entry!.path}` : context.entry!.path;
+          await copyPathText(absPath);
+          useSaturnoStore.setState({statusMessage:`Caminho absoluto copiado: ${absPath}`});
+        })}
         {menuItem('Copiar · Ctrl+C',()=>{clipboardCut=false; fileClipboard=[...useSaturnoStore.getState().selectedFilePaths];})}
         {menuItem('Recortar · Ctrl+X',()=>{clipboardCut=true; fileClipboard=[...s.selected];})}
         {menuItem('Duplicar · Ctrl+D',()=>copyTo(s.selected,parentOf(context.entry!.path)))}
         {menuItem('Renomear · F2',()=>startNaming('rename',context.entry),s.selected.length!==1)}
         {menuItem('Excluir · Delete',remove)}<hr />
+      </>}
+      {!context.entry && <>
+        {menuItem('Copiar caminho da pasta',async ()=>{
+          const root = (s.workspaceRoot || '').replace(/\/+$/, '');
+          const folderPath = s.folder ? (root ? `${root}/${s.folder}` : s.folder) : root;
+          await copyPathText(folderPath);
+          useSaturnoStore.setState({statusMessage:`Caminho copiado: ${folderPath}`});
+        })}
+        <hr />
       </>}
       {menuItem('Colar aqui · Ctrl+V',()=>pasteTo(context.entry?.type==='directory'?context.entry.path:context.entry?parentOf(context.entry.path):s.folder),!fileClipboard.length)}
       {menuItem('Novo notebook…',()=>startNaming('notebook'))}

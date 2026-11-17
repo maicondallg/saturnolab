@@ -13,6 +13,8 @@ export function persistAppearance(config: SaturnoConfig) {
       saturno_sidebar_pos: config.sidebar_position,
       saturno_nb_layout: config.notebook_layout,
       saturno_font_size: config.editor_font_size,
+      saturno_auto_save: config.auto_save,
+      saturno_auto_save_delay: config.auto_save_delay,
     };
     for (const [key, value] of Object.entries(values)) {
       if (value !== undefined) localStorage.setItem(key, String(value));

@@ -5,6 +5,7 @@ import {
   ArrowUp,
   Check,
   ChevronsDownUp,
+  ChevronsLeftRight,
   ChevronsUpDown,
   Columns3,
   Copy,
@@ -12,6 +13,7 @@ import {
   FileSpreadsheet,
   FileText,
   Image as ImageIcon,
+  Loader2,
   Maximize2,
   Minimize2,
   RotateCcw,
@@ -25,10 +27,15 @@ import { useShallow } from 'zustand/react/shallow';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 import { TableOutputSettings } from '../types/notebook';
 import {
+  classifyCellValue,
   compareTableCellValues,
   extractTableDelimited,
   inspectAndEnhanceHtml,
+  isEllipsisToken,
   TableMeta,
+  VirtualExportSource,
+  VirtualTableData,
+  VirtualTableRow,
 } from '../utils/htmlTableUtils';
 import {
   copyTablePngToClipboard,
@@ -43,6 +50,17 @@ import {
 interface Props {
   rawHtml: string;
   outputLimited?: boolean;
+  onExpandTruncated?: () => void;
+  isExpandingTruncated?: boolean;
+  isExpandedTruncated?: boolean;
+}
+
+export interface InspectedCellData {
+  colIndex: number;
+  colLabel: string;
+  rowLabel: string;
+  text: string;
+  isPandasCut: boolean;
 }
 
 interface SortState {
@@ -76,6 +94,8 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
 
 interface TableViewportProps {
   tableHtml: string;
+  virtualData?: VirtualTableData;
+  activeVirtualRows?: VirtualTableRow[];
   preservedStylesHtml?: string;
   meta: TableMeta;
   settings: TableOutputSettings;
@@ -95,9 +115,629 @@ interface TableViewportProps {
   isFullscreen?: boolean;
   modalExpanded?: boolean;
   outputLimited?: boolean;
+  onInspectCell?: (cell: InspectedCellData) => void;
 }
 
-const TableViewport: React.FC<TableViewportProps> = React.memo(({
+const VIRTUAL_OVERSCAN_ROWS = 18;
+const PT_BR_COLLATOR = new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'base' });
+
+function estimateRowHeightPx(settings: TableOutputSettings): number {
+  const lineH = Math.round(settings.font_size * 1.4);
+  const padY =
+    settings.density === 'compact' ? 6 : settings.density === 'comfortable' ? 14 : 10;
+  return lineH + padY + 1;
+}
+
+function decorateSortValue(raw: string, isNumericCol: boolean): { missing: boolean; num: number; str: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { missing: true, num: NaN, str: '' };
+  if (isNumericCol) {
+    // Fast C++ path for plain numbers (99% of numeric cells)
+    const direct = Number(trimmed);
+    if (!Number.isNaN(direct)) {
+      return { missing: false, num: direct, str: trimmed };
+    }
+  }
+  const kind = classifyCellValue(trimmed);
+  if (kind === 'empty' || kind === 'null') {
+    return { missing: true, num: NaN, str: '' };
+  }
+  if (isNumericCol || kind === 'number') {
+    const num = Number(trimmed.replace(/,/g, '').replace(/%$/, ''));
+    if (!Number.isNaN(num)) {
+      return { missing: false, num, str: trimmed };
+    }
+  }
+  return { missing: false, num: NaN, str: trimmed };
+}
+
+const VirtualTableViewport: React.FC<
+  Omit<TableViewportProps, 'tableHtml' | 'filterQuery' | 'onVisibleCountChange'> & {
+    virtualData: VirtualTableData;
+    rows: VirtualTableRow[];
+  }
+> = React.memo(({
+  virtualData,
+  rows,
+  preservedStylesHtml = '',
+  meta,
+  settings,
+  sortState,
+  onSortChange,
+  colOrder,
+  onColOrderChange,
+  colWidths,
+  onColWidthChange,
+  hiddenCols,
+  onVerticalOverflowChange,
+  tableRefOut,
+  viewportRefOut,
+  scrollRefOut,
+  isFullscreen = false,
+  modalExpanded = false,
+  outputLimited = false,
+}) => {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const theadRef = useRef<HTMLTableSectionElement>(null);
+  const theadOrigCellsRef = useRef<Map<HTMLTableRowElement, HTMLTableCellElement[]>>(new Map());
+  const suppressNextSortClickRef = useRef(false);
+
+  const [scrollState, setScrollState] = useState({ left: false, right: false });
+  const [viewportHeight, setViewportHeight] = useState(400);
+  const [measuredRowH, setMeasuredRowH] = useState<number | null>(null);
+  const [windowStart, setWindowStart] = useState(0);
+
+  const rowH =
+    settings.wrap === 'nowrap' && measuredRowH && measuredRowH > 14
+      ? measuredRowH
+      : estimateRowHeightPx(settings);
+
+  useEffect(() => {
+    setMeasuredRowH(null);
+  }, [settings.density, settings.font_size, settings.wrap]);
+
+  useLayoutEffect(() => {
+    tableRefOut.current = tableRef.current;
+    if (viewportRefOut) viewportRefOut.current = viewportRef.current;
+    if (scrollRefOut) scrollRefOut.current = scrollRef.current;
+    return () => {
+      tableRefOut.current = null;
+      if (viewportRefOut) viewportRefOut.current = null;
+      if (scrollRefOut) scrollRefOut.current = null;
+    };
+  }, [tableRefOut, viewportRefOut, scrollRefOut]);
+
+  // Clamp windowStart when filtered row count shrinks
+  useEffect(() => {
+    setWindowStart((prev) => {
+      if (rows.length === 0) return 0;
+      if (prev >= rows.length) {
+        const clamped = Math.max(0, rows.length - 40);
+        return Math.floor(clamped / 2) * 2;
+      }
+      return prev;
+    });
+  }, [rows.length]);
+
+  const computeWindowStart = useCallback(
+    (scrollTop: number, totalRows: number) => {
+      if (totalRows <= 0 || scrollTop <= 4) return 0;
+      const raw = Math.floor(scrollTop / Math.max(16, rowH)) - VIRTUAL_OVERSCAN_ROWS;
+      if (raw <= 0) return 0;
+      const clamped = Math.min(raw, Math.max(0, totalRows - 20));
+      // Keep even alignment so zebra striping (:nth-child) never flickers on scroll
+      return Math.floor(clamped / 2) * 2;
+    },
+    [rowH]
+  );
+
+  const measureScrollAndWindow = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ch = el.clientHeight || 400;
+    setViewportHeight((prev) => (Math.abs(prev - ch) > 4 ? ch : prev));
+
+    const canLeft = el.scrollLeft > 2;
+    const canRight = el.scrollLeft + el.clientWidth < el.scrollWidth - 2;
+    setScrollState((prev) =>
+      prev.left === canLeft && prev.right === canRight
+        ? prev
+        : { left: canLeft, right: canRight }
+    );
+    if (onVerticalOverflowChange) {
+      const overflows = el.scrollHeight > el.clientHeight + 2;
+      onVerticalOverflowChange(overflows);
+    }
+
+    const targetStart = computeWindowStart(el.scrollTop, rows.length);
+    setWindowStart((prev) => {
+      if (targetStart === 0 && prev !== 0) return 0;
+      if (Math.abs(targetStart - prev) >= 4 || targetStart + 24 >= rows.length) {
+        return targetStart;
+      }
+      return prev;
+    });
+  }, [computeWindowStart, onVerticalOverflowChange, rows.length]);
+
+  // Mount lightweight <thead> HTML once per virtualData change
+  useLayoutEffect(() => {
+    const theadEl = theadRef.current;
+    if (!theadEl) return;
+    if (virtualData.theadHtml) {
+      const tempTable = document.createElement('table');
+      tempTable.innerHTML = virtualData.theadHtml;
+      const parsedThead = tempTable.tHead;
+      theadEl.innerHTML = parsedThead ? parsedThead.innerHTML : '';
+    } else {
+      theadEl.innerHTML = '';
+    }
+
+    const map = new Map<HTMLTableRowElement, HTMLTableCellElement[]>();
+    for (const tr of Array.from(theadEl.rows)) {
+      map.set(tr, Array.from(tr.cells));
+    }
+    for (const hCell of Array.from(theadEl.querySelectorAll<HTMLElement>('[data-sat-resizable-col]'))) {
+      const origCol = hCell.getAttribute('data-sat-resizable-col');
+      if (origCol !== null && !hCell.querySelector('.sat-col-resize-handle')) {
+        const handle = document.createElement('div');
+        handle.className = 'sat-col-resize-handle';
+        handle.setAttribute('data-sat-resize-col', origCol);
+        handle.setAttribute(
+          'title',
+          'Arrastar para mudar largura da coluna • Duplo-clique para redefinir'
+        );
+        hCell.appendChild(handle);
+      }
+    }
+    theadOrigCellsRef.current = map;
+  }, [virtualData]);
+
+  const hiddenSet = useMemo(() => new Set(hiddenCols), [hiddenCols]);
+  const visibleCols = useMemo(
+    () => colOrder.filter((c) => !hiddenSet.has(c)),
+    [colOrder, hiddenSet]
+  );
+  const firstVisibleCol = visibleCols[0];
+
+  // Sync <thead> column order, hidden columns, widths, and sort indicator
+  useLayoutEffect(() => {
+    const theadEl = theadRef.current;
+    if (!theadEl) return;
+
+    for (const tr of Array.from(theadEl.rows)) {
+      const origCells = theadOrigCellsRef.current.get(tr);
+      if (!origCells || origCells.length === 0) continue;
+
+      if (meta.canReorderColumns && origCells.length === meta.totalCols && colOrder.length === meta.totalCols) {
+        const frag = document.createDocumentFragment();
+        for (const colIdx of colOrder) {
+          const cell = origCells[colIdx];
+          if (cell) frag.appendChild(cell);
+        }
+        tr.appendChild(frag);
+      }
+
+      for (let origIdx = 0; origIdx < origCells.length; origIdx++) {
+        const cell = origCells[origIdx];
+        if (!cell) continue;
+        const isHidden = hiddenSet.has(origIdx);
+        cell.hidden = isHidden;
+        if (isHidden) {
+          cell.setAttribute('data-sat-col-hidden', 'true');
+        } else {
+          cell.removeAttribute('data-sat-col-hidden');
+        }
+
+        if (meta.canStickyIndex && origIdx === 0) {
+          if (firstVisibleCol === 0) {
+            cell.setAttribute('data-sat-sticky-index', 'true');
+          } else {
+            cell.removeAttribute('data-sat-sticky-index');
+          }
+        }
+      }
+    }
+
+    for (const cell of Array.from(theadEl.querySelectorAll('[data-sat-sortable-col]'))) {
+      const colAttr = Number(cell.getAttribute('data-sat-sortable-col'));
+      if (sortState && sortState.col === colAttr) {
+        cell.setAttribute('data-sat-sort', sortState.dir);
+      } else {
+        cell.removeAttribute('data-sat-sort');
+      }
+    }
+
+    const raf = window.requestAnimationFrame(measureScrollAndWindow);
+    return () => window.cancelAnimationFrame(raf);
+  }, [
+    colOrder,
+    hiddenSet,
+    firstVisibleCol,
+    sortState,
+    meta.canReorderColumns,
+    meta.canStickyIndex,
+    meta.totalCols,
+    measureScrollAndWindow,
+  ]);
+
+  const visibleWindowCount = Math.ceil(Math.max(240, viewportHeight) / Math.max(16, rowH));
+  const startIdx = Math.min(windowStart, Math.max(0, rows.length));
+  const endIdx = Math.min(
+    rows.length,
+    startIdx + visibleWindowCount + VIRTUAL_OVERSCAN_ROWS * 2
+  );
+  const renderedSlice = rows.slice(startIdx, endIdx);
+  const topPad = startIdx * rowH;
+  const bottomPad = Math.max(0, (rows.length - endIdx) * rowH);
+
+  // Measure actual rendered row height once & apply Styler contrast ONLY to the ~50 mounted rows
+  useLayoutEffect(() => {
+    const tbl = tableRef.current;
+    if (!tbl) return;
+    if (settings.wrap === 'nowrap' && measuredRowH === null && renderedSlice.length > 0) {
+      const sampleTr = tbl.tBodies[0]?.querySelector('tr:not([data-sat-spacer="true"])') as HTMLElement | null;
+      if (sampleTr) {
+        const h = sampleTr.getBoundingClientRect().height;
+        if (h > 14 && Math.abs(h - rowH) >= 0.5) {
+          setMeasuredRowH(h);
+        }
+      }
+    }
+    if (virtualData.hasCustomStyles || preservedStylesHtml) {
+      ensureReadableStylerContrast(tbl);
+    }
+  }, [renderedSlice, settings.wrap, measuredRowH, rowH, virtualData.hasCustomStyles, preservedStylesHtml]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => measureScrollAndWindow());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measureScrollAndWindow, settings]);
+
+  // Column widths & table total width for rock-solid horizontal stability during scroll
+  const { effectiveColWidths, totalTableWidth } = useMemo(() => {
+    const globalCap =
+      settings.max_col_width > 0
+        ? settings.max_col_width
+        : settings.wrap === 'wrap'
+          ? 340
+          : 560;
+    const widths: Record<number, number> = {};
+    let sum = 0;
+    for (const c of visibleCols) {
+      const custom = colWidths[c];
+      const est = virtualData.colEstimatedWidths[c] || 96;
+      const w = custom && custom > 0 ? custom : Math.min(globalCap, est);
+      widths[c] = w;
+      sum += w;
+    }
+    return { effectiveColWidths: widths, totalTableWidth: Math.max(120, sum) };
+  }, [visibleCols, colWidths, virtualData.colEstimatedWidths, settings.max_col_width, settings.wrap]);
+
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement;
+
+      const resizeHandle = target.closest('.sat-col-resize-handle') as HTMLElement | null;
+      if (resizeHandle) {
+        e.preventDefault();
+        e.stopPropagation();
+        const origCol = Number(resizeHandle.getAttribute('data-sat-resize-col'));
+        const th = resizeHandle.parentElement as HTMLTableCellElement | null;
+        if (Number.isNaN(origCol) || !th) return;
+
+        const startX = e.clientX;
+        const startWidth = th.getBoundingClientRect().width;
+        resizeHandle.setAttribute('data-resizing', 'true');
+        suppressNextSortClickRef.current = true;
+
+        const onMove = (ev: PointerEvent) => {
+          const delta = ev.clientX - startX;
+          const nextW = Math.max(48, Math.min(1200, Math.round(startWidth + delta)));
+          onColWidthChange(origCol, nextW);
+        };
+
+        const onUp = () => {
+          resizeHandle.removeAttribute('data-resizing');
+          window.removeEventListener('pointermove', onMove, true);
+          window.removeEventListener('pointerup', onUp, true);
+          window.setTimeout(() => {
+            suppressNextSortClickRef.current = false;
+          }, 50);
+        };
+
+        window.addEventListener('pointermove', onMove, true);
+        window.addEventListener('pointerup', onUp, true);
+        return;
+      }
+
+      if (!meta.canReorderColumns) return;
+      const th = target.closest('thead th[data-sat-orig-col]') as HTMLTableCellElement | null;
+      if (!th) return;
+      const sourceCol = Number(th.getAttribute('data-sat-orig-col'));
+      if (Number.isNaN(sourceCol)) return;
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let isDragging = false;
+      let dropTargetCol: number | null = null;
+      let dropSide: 'left' | 'right' = 'right';
+
+      const clearIndicators = () => {
+        const theadEl = theadRef.current;
+        if (!theadEl) return;
+        for (const el of Array.from(theadEl.querySelectorAll('[data-sat-drop-side], [data-sat-dragging]'))) {
+          el.removeAttribute('data-sat-drop-side');
+          el.removeAttribute('data-sat-dragging');
+        }
+      };
+
+      const onMove = (ev: PointerEvent) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        if (!isDragging) {
+          if (Math.abs(dx) < 6 || Math.abs(dy) > Math.abs(dx) * 1.5) return;
+          isDragging = true;
+          suppressNextSortClickRef.current = true;
+          th.setAttribute('data-sat-dragging', 'true');
+        }
+
+        const theadEl = theadRef.current;
+        if (!theadEl) return;
+        for (const el of Array.from(theadEl.querySelectorAll('[data-sat-drop-side]'))) {
+          el.removeAttribute('data-sat-drop-side');
+        }
+
+        const elemBelow = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+        const hoverTh = elemBelow?.closest('thead th[data-sat-orig-col]') as HTMLTableCellElement | null;
+        if (!hoverTh || !theadEl.contains(hoverTh)) {
+          dropTargetCol = null;
+          return;
+        }
+        const candCol = Number(hoverTh.getAttribute('data-sat-orig-col'));
+        if (Number.isNaN(candCol) || candCol === sourceCol) {
+          dropTargetCol = null;
+          return;
+        }
+
+        const rect = hoverTh.getBoundingClientRect();
+        dropSide = ev.clientX < rect.left + rect.width / 2 ? 'left' : 'right';
+        dropTargetCol = candCol;
+        hoverTh.setAttribute('data-sat-drop-side', dropSide);
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+
+        if (isDragging) {
+          clearIndicators();
+          if (dropTargetCol !== null && dropTargetCol !== sourceCol) {
+            const nextOrder = colOrder.filter((c) => c !== sourceCol);
+            const targetIdx = nextOrder.indexOf(dropTargetCol);
+            if (targetIdx !== -1) {
+              const insertAt = dropSide === 'left' ? targetIdx : targetIdx + 1;
+              nextOrder.splice(insertAt, 0, sourceCol);
+              onColOrderChange(nextOrder);
+            }
+          }
+          window.setTimeout(() => {
+            suppressNextSortClickRef.current = false;
+          }, 50);
+        }
+      };
+
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', onUp, true);
+    },
+    [meta.canReorderColumns, colOrder, onColOrderChange, onColWidthChange]
+  );
+
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement;
+      const resizeHandle = target.closest('.sat-col-resize-handle') as HTMLElement | null;
+      if (!resizeHandle) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const origCol = Number(resizeHandle.getAttribute('data-sat-resize-col'));
+      if (Number.isNaN(origCol)) return;
+      onColWidthChange(origCol, null);
+    },
+    [onColWidthChange]
+  );
+
+  const handleTableClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (suppressNextSortClickRef.current) {
+      suppressNextSortClickRef.current = false;
+      return;
+    }
+    const target = e.target as HTMLElement;
+    if (target.closest('.sat-col-resize-handle')) return;
+    if (!meta.canSort) return;
+    const sel = window.getSelection()?.toString();
+    if (sel) return;
+    const th = target.closest('thead [data-sat-sortable-col]') as HTMLElement | null;
+    if (!th) return;
+    const col = Number(th.getAttribute('data-sat-sortable-col'));
+    if (Number.isNaN(col)) return;
+    if (!sortState || sortState.col !== col) {
+      onSortChange({ col, dir: 'asc' });
+    } else if (sortState.dir === 'asc') {
+      onSortChange({ col, dir: 'desc' });
+    } else {
+      onSortChange(null);
+    }
+  };
+
+  // Even when settings.height === 'full', bound huge virtualized tables to 76vh so they never
+  // force the browser to render tens of thousands of unvirtualized rows on the page.
+  const maxH = isFullscreen
+    ? modalExpanded
+      ? 'calc(90vh - 44px)'
+      : 'calc(84vh - 44px)'
+    : settings.height === 'full'
+      ? '76vh'
+      : outputLimited
+        ? '210px'
+        : '400px';
+
+  const maxColW =
+    settings.max_col_width > 0
+      ? `${settings.max_col_width}px`
+      : settings.wrap === 'wrap'
+        ? '340px'
+        : 'none';
+
+  const topPadHalf1 = Math.floor(topPad / 2);
+  const topPadHalf2 = topPad - topPadHalf1;
+
+  return (
+    <div
+      ref={viewportRef}
+      className={`sat-table-viewport relative min-w-0 ${isFullscreen ? 'flex-1 min-h-0 flex flex-col' : ''} ${
+        scrollState.left ? 'is-scrolled-x' : ''
+      }`}
+      data-wrap={settings.wrap}
+      data-density={settings.density}
+      data-align={settings.align}
+      data-sticky={String(settings.sticky_headers)}
+      data-highlight={String(settings.highlight_types)}
+      data-grid={String(settings.show_grid)}
+      style={{
+        ['--sat-table-font-size' as any]: `${settings.font_size}px`,
+        ['--sat-table-max-col-w' as any]: maxColW,
+      }}
+    >
+      <div
+        ref={scrollRef}
+        onScroll={measureScrollAndWindow}
+        className={`sat-table-scroll overflow-auto ${isFullscreen ? 'flex-1 min-h-0' : ''}`}
+        style={{ maxHeight: maxH }}
+      >
+        <div
+          onPointerDown={handlePointerDown}
+          onDoubleClick={handleDoubleClick}
+          onClick={handleTableClick}
+          className="sat-table-host min-w-full"
+        >
+          {preservedStylesHtml && (
+            <div
+              aria-hidden="true"
+              className="hidden"
+              dangerouslySetInnerHTML={{ __html: preservedStylesHtml }}
+            />
+          )}
+          <table
+            ref={tableRef}
+            id={virtualData.tableId}
+            className={virtualData.tableClass || 'sat-table'}
+            style={{
+              tableLayout: 'fixed',
+              width: `${totalTableWidth}px`,
+              minWidth: '100%',
+            }}
+          >
+            <colgroup>
+              {visibleCols.map((colIdx) => (
+                <col
+                  key={colIdx}
+                  style={{
+                    width: `${effectiveColWidths[colIdx]}px`,
+                  }}
+                />
+              ))}
+            </colgroup>
+            <thead ref={theadRef} />
+            <tbody>
+              {/* Two spacer rows preserve exact :nth-child(even) zebra parity during scroll */}
+              {topPad > 0 && (
+                <>
+                  <tr data-sat-spacer="true" aria-hidden="true" style={{ height: `${topPadHalf1}px` }}>
+                    <td colSpan={Math.max(1, visibleCols.length)} style={{ padding: 0, border: 0 }} />
+                  </tr>
+                  <tr data-sat-spacer="true" aria-hidden="true" style={{ height: `${topPadHalf2}px` }}>
+                    <td colSpan={Math.max(1, visibleCols.length)} style={{ padding: 0, border: 0 }} />
+                  </tr>
+                </>
+              )}
+              {renderedSlice.map((vRow, localIdx) => {
+                const absIdx = startIdx + localIdx;
+                const isEllipsis = Boolean(vRow.isEllipsis);
+                return (
+                  <tr
+                    key={absIdx}
+                    id={vRow.rowId}
+                    className={vRow.rowClass}
+                    data-sat-ellipsis-row={isEllipsis ? 'true' : undefined}
+                    ref={(el) => {
+                      if (el && vRow.rowStyle) el.setAttribute('style', vRow.rowStyle);
+                    }}
+                  >
+                    {visibleCols.map((colIdx) => {
+                      const isIndexCell = meta.canStickyIndex && colIdx === 0;
+                      const isStickyNow = isIndexCell && firstVisibleCol === 0;
+                      const txt = vRow.cells[colIdx] ?? '';
+                      const colType = virtualData.colTypes[colIdx] || 'text';
+                      const isEllipsisCol = virtualData.ellipsisCols[colIdx];
+                      const cellKind =
+                        isEllipsis || isEllipsisCol || isEllipsisToken(txt)
+                          ? 'null'
+                          : isIndexCell
+                            ? undefined
+                            : classifyCellValue(txt);
+                      const cs = vRow.cellStyles?.[colIdx];
+                      const CellTag = isIndexCell ? 'th' : 'td';
+
+                      return (
+                        <CellTag
+                          key={colIdx}
+                          id={cs?.id}
+                          className={cs?.className}
+                          title={txt || undefined}
+                          data-sat-orig-col={colIdx}
+                          data-sat-col-type={isIndexCell ? undefined : colType}
+                          data-sat-type={cellKind}
+                          data-sat-index-cell={isIndexCell ? 'true' : undefined}
+                          data-sat-sticky-index={isStickyNow ? 'true' : undefined}
+                          data-sat-ellipsis-col={isEllipsisCol ? 'true' : undefined}
+                          ref={(el) => {
+                            if (el && cs?.style) el.setAttribute('style', cs.style);
+                          }}
+                        >
+                          {txt}
+                        </CellTag>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+              {bottomPad > 0 && (
+                <tr data-sat-spacer="true" aria-hidden="true" style={{ height: `${bottomPad}px` }}>
+                  <td colSpan={Math.max(1, visibleCols.length)} style={{ padding: 0, border: 0 }} />
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {scrollState.right && (
+        <div
+          aria-hidden="true"
+          className="sat-table-fade-right pointer-events-none absolute top-0 right-0 bottom-0 w-6"
+        />
+      )}
+    </div>
+  );
+});
+
+const DomTableViewport: React.FC<TableViewportProps> = React.memo(({
   tableHtml,
   preservedStylesHtml = '',
   meta,
@@ -124,6 +764,8 @@ const TableViewport: React.FC<TableViewportProps> = React.memo(({
   const hostRef = useRef<HTMLDivElement>(null);
   const originalRowsRef = useRef<HTMLTableRowElement[]>([]);
   const rowOrigCellsRef = useRef<WeakMap<HTMLTableRowElement, HTMLTableCellElement[]>>(new WeakMap());
+  const hadCustomColsAppliedRef = useRef(false);
+  const hadSortAppliedRef = useRef(false);
   const suppressNextSortClickRef = useRef(false);
   const [scrollState, setScrollState] = useState({ left: false, right: false });
 
@@ -188,9 +830,13 @@ const TableViewport: React.FC<TableViewportProps> = React.memo(({
           map.set(tr, Array.from(tr.cells));
         }
       }
-      ensureReadableStylerContrast(table);
+      if (preservedStylesHtml || meta.hasCustomStyles) {
+        ensureReadableStylerContrast(table);
+      }
     }
     rowOrigCellsRef.current = map;
+    hadCustomColsAppliedRef.current = false;
+    hadSortAppliedRef.current = false;
 
     const raf = window.requestAnimationFrame(measureScroll);
     return () => {
@@ -199,13 +845,23 @@ const TableViewport: React.FC<TableViewportProps> = React.memo(({
       tableRefOut.current = null;
       host.innerHTML = '';
     };
-  }, [tableHtml, preservedStylesHtml, tableRefOut, measureScroll]);
+  }, [tableHtml, preservedStylesHtml, meta.hasCustomStyles, tableRefOut, measureScroll]);
 
   // Apply column order, custom column widths, and hidden columns to DOM
   useLayoutEffect(() => {
     const host = hostRef.current;
     const table = host?.querySelector('table') as HTMLTableElement | null;
     if (!table) return;
+
+    const isDefaultOrder =
+      colOrder.length === meta.totalCols && colOrder.every((c, idx) => c === idx);
+    const hasCustomWidths = Object.keys(colWidths).length > 0;
+    const hasHidden = hiddenCols.length > 0;
+
+    if (isDefaultOrder && !hasCustomWidths && !hasHidden && !hadCustomColsAppliedRef.current) {
+      return;
+    }
+    hadCustomColsAppliedRef.current = !isDefaultOrder || hasCustomWidths || hasHidden;
 
     const hiddenSet = new Set(hiddenCols);
     const map = rowOrigCellsRef.current;
@@ -300,18 +956,36 @@ const TableViewport: React.FC<TableViewportProps> = React.memo(({
     }
 
     // Reorder tbody rows when sorting is supported
-    if (meta.canSort && originalRowsRef.current.length > 0) {
+    if (meta.canSort && originalRowsRef.current.length > 0 && (sortState || hadSortAppliedRef.current)) {
       const map = rowOrigCellsRef.current;
       let orderedRows = originalRowsRef.current;
       if (sortState) {
-        orderedRows = [...originalRowsRef.current].sort((rowA, rowB) => {
-          const cellA = map.get(rowA)?.[sortState.col] ?? rowA.cells[sortState.col];
-          const cellB = map.get(rowB)?.[sortState.col] ?? rowB.cells[sortState.col];
-          const textA = cellA?.textContent || '';
-          const textB = cellB?.textContent || '';
-          const cmp = compareTableCellValues(textA, textB);
+        hadSortAppliedRef.current = true;
+        const decorated = originalRowsRef.current.map((row, idx) => {
+          const cell = map.get(row)?.[sortState.col] ?? row.cells[sortState.col];
+          const text = cell?.textContent || '';
+          return {
+            row,
+            idx,
+            key: decorateSortValue(text, cell?.getAttribute('data-sat-col-type') === 'number'),
+          };
+        });
+        decorated.sort((a, b) => {
+          if (a.key.missing && b.key.missing) return a.idx - b.idx;
+          if (a.key.missing) return 1;
+          if (b.key.missing) return -1;
+          let cmp = 0;
+          if (!Number.isNaN(a.key.num) && !Number.isNaN(b.key.num)) {
+            cmp = a.key.num - b.key.num;
+          } else {
+            cmp = PT_BR_COLLATOR.compare(a.key.str, b.key.str);
+          }
+          if (cmp === 0) return a.idx - b.idx;
           return sortState.dir === 'asc' ? cmp : -cmp;
         });
+        orderedRows = decorated.map((d) => d.row);
+      } else {
+        hadSortAppliedRef.current = false;
       }
       const frag = document.createDocumentFragment();
       for (const r of orderedRows) {
@@ -571,6 +1245,195 @@ const TableViewport: React.FC<TableViewportProps> = React.memo(({
           aria-hidden="true"
           className="sat-table-fade-right pointer-events-none absolute top-0 right-0 bottom-0 w-6"
         />
+      )}
+    </div>
+  );
+});
+
+const TableViewport: React.FC<TableViewportProps> = React.memo((props) => {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const hoveredTdRef = useRef<HTMLTableCellElement | null>(null);
+  const [hoverBtn, setHoverBtn] = useState<{
+    top: number;
+    left: number;
+    colIndex: number;
+    colLabel: string;
+    rowLabel: string;
+    text: string;
+    isPandasCut: boolean;
+    isExpandedInline: boolean;
+  } | null>(null);
+
+  const inspectTd = useCallback(
+    (td: HTMLTableCellElement) => {
+      const txt = (td.textContent || '').trim();
+      if (!txt) return null;
+      const colAttr = td.getAttribute('data-sat-orig-col');
+      const colIndex = colAttr !== null ? Number(colAttr) : td.cellIndex;
+      const colInfo = props.meta.columns.find((c) => c.index === colIndex);
+      const colLabel = colInfo?.label || `Coluna ${colIndex + 1}`;
+      const tr = td.parentElement as HTMLTableRowElement | null;
+      const rowTh = tr?.querySelector('th');
+      const rowLabel = (rowTh?.textContent || '').trim();
+      const isPandasCut =
+        !isEllipsisToken(txt) && (txt.endsWith('...') || txt.endsWith('…'));
+      return {
+        colIndex,
+        colLabel,
+        rowLabel,
+        text: txt,
+        isPandasCut,
+      };
+    },
+    [props.meta.columns]
+  );
+
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('[data-sat-cell-expand-trigger="true"]')) return;
+      const td = target.closest('tbody td') as HTMLTableCellElement | null;
+      if (!td || td.parentElement?.getAttribute('data-sat-spacer') === 'true') {
+        if (hoverBtn) setHoverBtn(null);
+        hoveredTdRef.current = null;
+        return;
+      }
+      const txt = (td.textContent || '').trim();
+      if (!txt || isEllipsisToken(txt)) {
+        if (hoverBtn) setHoverBtn(null);
+        hoveredTdRef.current = null;
+        return;
+      }
+      const isPandasCut = txt.endsWith('...') || txt.endsWith('…');
+      const isOverflowing =
+        td.scrollWidth > td.clientWidth + 1 || td.scrollHeight > td.clientHeight + 1;
+      const isLongText = txt.length > 36 || txt.includes('\n');
+      const isExpandedInline = td.hasAttribute('data-sat-cell-expanded');
+
+      if (!isOverflowing && !isPandasCut && !isLongText && !isExpandedInline) {
+        if (hoverBtn) setHoverBtn(null);
+        hoveredTdRef.current = null;
+        return;
+      }
+
+      const wrapEl = wrapRef.current;
+      if (!wrapEl) return;
+      const wrapRect = wrapEl.getBoundingClientRect();
+      const tdRect = td.getBoundingClientRect();
+      const top = Math.max(2, Math.round(tdRect.top - wrapRect.top + 2));
+      const left = Math.max(
+        4,
+        Math.min(wrapRect.width - 68, Math.round(tdRect.right - wrapRect.left - 64))
+      );
+
+      hoveredTdRef.current = td;
+      const info = inspectTd(td);
+      if (!info) return;
+      setHoverBtn({
+        top,
+        left,
+        ...info,
+        isExpandedInline,
+      });
+    },
+    [hoverBtn, inspectTd]
+  );
+
+  const handleMouseLeave = useCallback(() => {
+    setHoverBtn(null);
+    hoveredTdRef.current = null;
+  }, []);
+
+  const handleDoubleClickCapture = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('.sat-col-resize-handle')) return;
+      const td = target.closest('tbody td') as HTMLTableCellElement | null;
+      if (!td || td.parentElement?.getAttribute('data-sat-spacer') === 'true') return;
+      const info = inspectTd(td);
+      if (!info || !info.text) return;
+      td.toggleAttribute('data-sat-cell-expanded');
+      props.onInspectCell?.(info);
+    },
+    [inspectTd, props.onInspectCell]
+  );
+
+  const handleTriggerExpand = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!hoverBtn) return;
+      const td = hoveredTdRef.current;
+      if (td) {
+        td.toggleAttribute('data-sat-cell-expanded');
+        setHoverBtn((prev) =>
+          prev ? { ...prev, isExpandedInline: td.hasAttribute('data-sat-cell-expanded') } : null
+        );
+      }
+      props.onInspectCell?.({
+        colIndex: hoverBtn.colIndex,
+        colLabel: hoverBtn.colLabel,
+        rowLabel: hoverBtn.rowLabel,
+        text: hoverBtn.text,
+        isPandasCut: hoverBtn.isPandasCut,
+      });
+    },
+    [hoverBtn, props.onInspectCell]
+  );
+
+  return (
+    <div
+      ref={wrapRef}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
+      onDoubleClickCapture={handleDoubleClickCapture}
+      className={`relative min-w-0 ${props.isFullscreen ? 'flex-1 min-h-0 flex flex-col' : ''}`}
+    >
+      {props.virtualData && props.activeVirtualRows ? (
+        <VirtualTableViewport
+          virtualData={props.virtualData}
+          rows={props.activeVirtualRows}
+          preservedStylesHtml={props.preservedStylesHtml}
+          meta={props.meta}
+          settings={props.settings}
+          sortState={props.sortState}
+          onSortChange={props.onSortChange}
+          colOrder={props.colOrder}
+          onColOrderChange={props.onColOrderChange}
+          colWidths={props.colWidths}
+          onColWidthChange={props.onColWidthChange}
+          hiddenCols={props.hiddenCols}
+          onVerticalOverflowChange={props.onVerticalOverflowChange}
+          tableRefOut={props.tableRefOut}
+          viewportRefOut={props.viewportRefOut}
+          scrollRefOut={props.scrollRefOut}
+          isFullscreen={props.isFullscreen}
+          modalExpanded={props.modalExpanded}
+          outputLimited={props.outputLimited}
+        />
+      ) : (
+        <DomTableViewport {...props} />
+      )}
+
+      {hoverBtn && (
+        <button
+          type="button"
+          data-sat-cell-expand-trigger="true"
+          onClick={handleTriggerExpand}
+          style={{
+            top: `${hoverBtn.top}px`,
+            left: `${hoverBtn.left}px`,
+            backgroundColor: 'var(--sat-bg-surface)',
+            borderColor: 'var(--sat-border-strong)',
+            color: 'var(--sat-text-primary)',
+          }}
+          title="Expandir campo para ver descrição inteira (ou duplo-clique na célula)"
+          aria-label="Expandir campo"
+          className="absolute z-30 h-5 px-1.5 rounded-[3px] border shadow-md text-[10px] font-medium inline-flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer transition-colors"
+        >
+          <Maximize2 size={9.5} style={{ color: 'var(--sat-accent)' }} />
+          <span>Expandir</span>
+        </button>
       )}
     </div>
   );
@@ -1187,16 +2050,24 @@ const TableConfigPopover: React.FC<ConfigPopoverProps> = ({
 
 interface InteractiveTableCardProps {
   tableHtml: string;
+  virtualData?: VirtualTableData;
   meta: TableMeta;
   preservedStylesHtml?: string;
   outputLimited?: boolean;
+  onExpandTruncated?: () => void;
+  isExpandingTruncated?: boolean;
+  isExpandedTruncated?: boolean;
 }
 
 const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
   tableHtml,
+  virtualData,
   meta,
   preservedStylesHtml = '',
   outputLimited = false,
+  onExpandTruncated,
+  isExpandingTruncated = false,
+  isExpandedTruncated = false,
 }) => {
   const { globalSettings, setGlobalSettings } = useSaturnoStore(
     useShallow((s) => ({
@@ -1228,6 +2099,52 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
   const [modalCustomSize, setModalCustomSize] = useState<{ width: number; height: number } | null>(null);
   const [copiedFormat, setCopiedFormat] = useState<string | null>(null);
   const [savedDefaultToast, setSavedDefaultToast] = useState(false);
+  const [inspectedCell, setInspectedCell] = useState<InspectedCellData | null>(null);
+  const [copiedCellText, setCopiedCellText] = useState(false);
+
+  useEffect(() => {
+    if (!inspectedCell) return;
+    if (virtualData) {
+      const matchRow = virtualData.rows.find((r) => r.cells[0] === inspectedCell.rowLabel);
+      const nextTxt = matchRow?.cells[inspectedCell.colIndex];
+      if (nextTxt && nextTxt !== inspectedCell.text) {
+        setInspectedCell((prev) =>
+          prev ? { ...prev, text: nextTxt, isPandasCut: false } : null
+        );
+      }
+      return;
+    }
+    const raf = window.requestAnimationFrame(() => {
+      const tbl = tableRef.current;
+      if (!tbl || !tbl.tBodies[0]) return;
+      for (const tr of Array.from(tbl.tBodies[0].rows)) {
+        const rLabel = (tr.querySelector('th')?.textContent || '').trim();
+        if (rLabel === inspectedCell.rowLabel) {
+          const td = tr.querySelector(
+            `td[data-sat-orig-col="${inspectedCell.colIndex}"]`
+          ) as HTMLTableCellElement | null;
+          const nextTxt = (td?.textContent || '').trim();
+          if (nextTxt && nextTxt !== inspectedCell.text) {
+            setInspectedCell((prev) =>
+              prev ? { ...prev, text: nextTxt, isPandasCut: false } : null
+            );
+          }
+          break;
+        }
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [tableHtml, virtualData, inspectedCell]);
+
+  const hasTruncatedFields = useMemo(() => {
+    if (meta.isTruncated) return true;
+    if (virtualData) {
+      return virtualData.rows.some((r) =>
+        r.cells.some((c) => c.length > 42 || c.endsWith('...') || c.endsWith('…'))
+      );
+    }
+    return /(\.\.\.|…)\s*<\/td>/i.test(tableHtml) || /<td[^>]*>[^<]{42,}<\/td>/i.test(tableHtml);
+  }, [meta.isTruncated, virtualData, tableHtml]);
 
   const tableRef = useRef<HTMLTableElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -1258,7 +2175,67 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
     setColOrder(Array.from({ length: meta.totalCols }, (_, i) => i));
     setColWidths({});
     setHiddenCols([]);
-  }, [tableHtml, meta.visibleRows, meta.totalCols]);
+  }, [tableHtml, virtualData, meta.visibleRows, meta.totalCols]);
+
+  // Fast in-memory filter + O(N log N) pre-decorated sort for virtualized tables
+  const activeVirtualRows = useMemo<VirtualTableRow[] | undefined>(() => {
+    if (!virtualData) return undefined;
+    const needle = filterQuery.trim().toLowerCase();
+    let base: VirtualTableRow[];
+
+    if (!needle) {
+      base = virtualData.rows;
+    } else {
+      base = [];
+      for (let i = 0; i < virtualData.rows.length; i++) {
+        const r = virtualData.rows[i];
+        if (r.isEllipsis) continue;
+        if (r._searchCache === undefined) {
+          r._searchCache = r.cells.join('\x1f').toLowerCase();
+        }
+        if (r._searchCache.includes(needle)) {
+          base.push(r);
+        }
+      }
+    }
+
+    if (!sortState || !meta.canSort || base.length <= 1) {
+      return base;
+    }
+
+    const col = sortState.col;
+    const isNumCol = virtualData.colTypes[col] === 'number';
+    const decorated = base.map((row, idx) => ({
+      row,
+      idx,
+      key: decorateSortValue(row.cells[col] ?? '', isNumCol),
+    }));
+
+    decorated.sort((a, b) => {
+      if (a.key.missing && b.key.missing) return a.idx - b.idx;
+      if (a.key.missing) return 1;
+      if (b.key.missing) return -1;
+      let cmp = 0;
+      if (!Number.isNaN(a.key.num) && !Number.isNaN(b.key.num)) {
+        cmp = a.key.num - b.key.num;
+      } else {
+        cmp = a.key.str.localeCompare(b.key.str, 'pt-BR', { numeric: true, sensitivity: 'base' });
+      }
+      if (cmp === 0) return a.idx - b.idx;
+      return sortState.dir === 'asc' ? cmp : -cmp;
+    });
+
+    return decorated.map((d) => d.row);
+  }, [virtualData, filterQuery, sortState, meta.canSort]);
+
+  useEffect(() => {
+    if (!activeVirtualRows) return;
+    let count = 0;
+    for (let i = 0; i < activeVirtualRows.length; i++) {
+      if (!activeVirtualRows[i].isEllipsis) count++;
+    }
+    setVisibleCount(count);
+  }, [activeVirtualRows]);
 
   useEffect(() => {
     if (!isFullscreen) return;
@@ -1330,17 +2307,42 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
     return orderChanged || widthsChanged || hiddenChanged;
   }, [colOrder, defaultColOrder, colWidths, hiddenCols]);
 
+  const virtualExportSource = useMemo<VirtualExportSource | undefined>(() => {
+    if (!virtualData || !activeVirtualRows) return undefined;
+    return {
+      headerRows: virtualData.headerTextRows,
+      rows: activeVirtualRows,
+      colOrder,
+      hiddenCols: new Set(hiddenCols),
+    };
+  }, [virtualData, activeVirtualRows, colOrder, hiddenCols]);
+
+  const virtualExportFullSource = useMemo<VirtualExportSource | undefined>(() => {
+    if (!virtualData) return undefined;
+    // Full scope exports all rows (ordered if sortState active, ignoring row filter)
+    const baseRows =
+      !filterQuery.trim() && activeVirtualRows ? activeVirtualRows : virtualData.rows;
+    return {
+      headerRows: virtualData.headerTextRows,
+      rows: baseRows,
+      colOrder,
+      hiddenCols: new Set(hiddenCols),
+    };
+  }, [virtualData, activeVirtualRows, filterQuery, colOrder, hiddenCols]);
+
   const handleCopy = useCallback(async (format: 'tsv' | 'csv' | 'markdown') => {
     const tbl = (isFullscreen ? fullscreenTableRef.current : tableRef.current) || tableRef.current;
     if (!tbl) return;
-    const text = extractTableDelimited(tbl, format);
+    const text = extractTableDelimited(tbl, format, {
+      virtualSource: virtualExportSource,
+    });
     if (!text) return;
     const ok = await copyTextToClipboard(text);
     if (ok) {
       setCopiedFormat(format);
       window.setTimeout(() => setCopiedFormat((cur) => (cur === format ? null : cur)), 1500);
     }
-  }, [isFullscreen]);
+  }, [isFullscreen, virtualExportSource]);
 
   const flashExportStatus = useCallback((status: string) => {
     setExportStatus(status);
@@ -1368,21 +2370,49 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
         tbl,
         preservedStylesHtml,
         scope,
-        scope === 'displayed' ? 'tabela-recorte.png' : 'tabela-completa.png'
+        scope === 'displayed' ? 'tabela-recorte.png' : 'tabela-completa.png',
+        scope === 'full' ? virtualExportFullSource : virtualExportSource,
+        meta.canStickyIndex,
+        virtualData?.colTypes
       );
       if (ok) flashExportStatus('png');
     },
-    [getActiveRefs, preservedStylesHtml, flashExportStatus]
+    [
+      getActiveRefs,
+      preservedStylesHtml,
+      flashExportStatus,
+      virtualExportFullSource,
+      virtualExportSource,
+      meta.canStickyIndex,
+      virtualData?.colTypes,
+    ]
   );
 
   const handleCopyPng = useCallback(
     async (scope: ExportScope) => {
       const { tbl, vp, sc } = getActiveRefs();
       if (!tbl || !vp || !sc) return;
-      const ok = await copyTablePngToClipboard(vp, sc, tbl, preservedStylesHtml, scope);
+      const ok = await copyTablePngToClipboard(
+        vp,
+        sc,
+        tbl,
+        preservedStylesHtml,
+        scope,
+        scope === 'full' ? virtualExportFullSource : virtualExportSource,
+        meta.canStickyIndex,
+        virtualData?.colTypes
+      );
       if (ok) flashExportStatus('copy-png');
     },
-    [getActiveRefs, preservedStylesHtml, flashExportStatus]
+    [
+      getActiveRefs,
+      preservedStylesHtml,
+      flashExportStatus,
+      virtualExportFullSource,
+      virtualExportSource,
+      meta.canStickyIndex,
+      virtualData?.colTypes,
+    ]
   );
 
   const handleExportCsv = useCallback(
@@ -1394,11 +2424,12 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
         sc,
         scope,
         hasFilter,
-        scope === 'displayed' ? 'tabela-exibida.csv' : 'tabela-completa.csv'
+        scope === 'displayed' ? 'tabela-exibida.csv' : 'tabela-completa.csv',
+        scope === 'full' ? virtualExportFullSource : virtualExportSource
       );
       flashExportStatus('csv');
     },
-    [getActiveRefs, hasFilter, flashExportStatus]
+    [getActiveRefs, hasFilter, flashExportStatus, virtualExportFullSource, virtualExportSource]
   );
 
   const handleExportXlsx = useCallback(
@@ -1410,11 +2441,12 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
         sc,
         scope,
         hasFilter,
-        scope === 'displayed' ? 'tabela-exibida.xlsx' : 'tabela-completa.xlsx'
+        scope === 'displayed' ? 'tabela-exibida.xlsx' : 'tabela-completa.xlsx',
+        scope === 'full' ? virtualExportFullSource : virtualExportSource
       );
       flashExportStatus('xlsx');
     },
-    [getActiveRefs, hasFilter, flashExportStatus]
+    [getActiveRefs, hasFilter, flashExportStatus, virtualExportFullSource, virtualExportSource]
   );
 
   const handleSaveAsDefault = useCallback(() => {
@@ -1625,6 +2657,55 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
             <WrapText size={12.5} />
           </button>
 
+          {(hasTruncatedFields || isExpandedTruncated) && (
+            <button
+              type="button"
+              disabled={isExpandingTruncated}
+              onClick={() => {
+                const isAllFieldsExpanded =
+                  effectiveSettings.wrap === 'wrap' && effectiveSettings.max_col_width === 0;
+                if (isAllFieldsExpanded && !isExpandedTruncated) {
+                  updateLocal({
+                    wrap: 'nowrap',
+                    max_col_width: globalSettings.max_col_width || 280,
+                  });
+                } else {
+                  updateLocal({ wrap: 'wrap', max_col_width: 0 });
+                  if (onExpandTruncated && (!isExpandedTruncated || meta.isTruncated)) {
+                    onExpandTruncated();
+                  }
+                }
+              }}
+              className={toolbarBtnClass}
+              style={{
+                backgroundColor:
+                  isExpandedTruncated ||
+                  (effectiveSettings.wrap === 'wrap' && effectiveSettings.max_col_width === 0)
+                    ? 'var(--sat-accent-soft)'
+                    : undefined,
+                color:
+                  isExpandedTruncated ||
+                  (effectiveSettings.wrap === 'wrap' && effectiveSettings.max_col_width === 0)
+                    ? 'var(--sat-accent)'
+                    : 'var(--sat-text-muted)',
+              }}
+              title="Expandir campos cortados com ... para ver descrições completas"
+              aria-label="Expandir campos cortados"
+            >
+              {isExpandingTruncated ? (
+                <Loader2 size={11.5} className="animate-spin" />
+              ) : (
+                <ChevronsLeftRight size={12.5} />
+              )}
+              <span className="hidden md:inline text-[10.5px]">
+                {isExpandedTruncated ||
+                (effectiveSettings.wrap === 'wrap' && effectiveSettings.max_col_width === 0)
+                  ? 'Recolher (...)'
+                  : 'Expandir (...)'}
+              </span>
+            </button>
+          )}
+
           {(verticalOverflow || effectiveSettings.height === 'full') && (
             <button
               type="button"
@@ -1733,6 +2814,8 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
       {/* Scrollable Table Body */}
       <TableViewport
         tableHtml={tableHtml}
+        virtualData={virtualData}
+        activeVirtualRows={activeVirtualRows}
         preservedStylesHtml={preservedStylesHtml}
         meta={meta}
         settings={effectiveSettings}
@@ -1750,7 +2833,113 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
         viewportRefOut={viewportRef}
         scrollRefOut={scrollRef}
         outputLimited={outputLimited}
+        onInspectCell={(info) => {
+          setInspectedCell(info);
+          if (info.isPandasCut && onExpandTruncated && !isExpandedTruncated) {
+            onExpandTruncated();
+          }
+        }}
       />
+
+      {inspectedCell && (
+        <div
+          data-sat-field-inspector="true"
+          className="px-3 py-2.5 border-t space-y-1.5 text-xs"
+          style={{
+            backgroundColor: 'var(--sat-bg-surface)',
+            borderColor: 'var(--sat-border)',
+            color: 'var(--sat-text-primary)',
+          }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-semibold text-[11.5px] truncate">
+                Campo: {inspectedCell.colLabel}
+              </span>
+              {inspectedCell.rowLabel && (
+                <span
+                  className="font-mono text-[10.5px] px-1.5 py-0.5 rounded-[2px]"
+                  style={{
+                    backgroundColor: 'var(--sat-bg-subtle)',
+                    color: 'var(--sat-text-secondary)',
+                  }}
+                >
+                  Linha {inspectedCell.rowLabel}
+                </span>
+              )}
+              <span
+                className="font-mono text-[10.5px]"
+                style={{ color: 'var(--sat-text-muted)' }}
+              >
+                {inspectedCell.text.length} caracteres
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {inspectedCell.isPandasCut && onExpandTruncated && !isExpandedTruncated && (
+                <button
+                  type="button"
+                  onClick={onExpandTruncated}
+                  disabled={isExpandingTruncated}
+                  className="h-6 px-2 rounded-[3px] border text-[11px] font-medium inline-flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer"
+                  style={{
+                    backgroundColor: 'var(--sat-accent-soft)',
+                    borderColor: 'var(--sat-accent)',
+                    color: 'var(--sat-accent)',
+                  }}
+                >
+                  {isExpandingTruncated ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <ChevronsLeftRight size={11} />
+                  )}
+                  <span>Ver texto sem corte (...)</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const ok = await copyTextToClipboard(inspectedCell.text);
+                  if (ok) {
+                    setCopiedCellText(true);
+                    window.setTimeout(() => setCopiedCellText(false), 1500);
+                  }
+                }}
+                className="h-6 px-2 rounded-[3px] border text-[11px] inline-flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer"
+                style={{
+                  backgroundColor: 'var(--sat-bg-subtle)',
+                  borderColor: 'var(--sat-border)',
+                  color: copiedCellText ? 'var(--sat-green)' : 'var(--sat-text-secondary)',
+                }}
+              >
+                {copiedCellText ? <Check size={11} /> : <Copy size={11} />}
+                <span>{copiedCellText ? 'Copiado' : 'Copiar'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setInspectedCell(null)}
+                className="sat-icon-btn p-1"
+                title="Fechar visualização do campo"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          </div>
+
+          <pre
+            className="m-0 p-2.5 rounded-[3px] border font-mono text-xs leading-relaxed whitespace-pre-wrap break-words max-h-48 overflow-y-auto select-text"
+            style={{
+              backgroundColor: 'var(--sat-bg-canvas)',
+              borderColor: 'var(--sat-border-subtle)',
+              color: 'var(--sat-text-primary)',
+            }}
+          >
+            {inspectedCell.text}
+          </pre>
+        </div>
+      )}
 
       {hasFilter && visibleCount === 0 && (
         <div
@@ -2027,6 +3216,8 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
 
               <TableViewport
                 tableHtml={tableHtml}
+                virtualData={virtualData}
+                activeVirtualRows={activeVirtualRows}
                 preservedStylesHtml={preservedStylesHtml}
                 meta={meta}
                 settings={effectiveSettings}
@@ -2068,37 +3259,49 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
   );
 });
 
-export const TableOutputView: React.FC<Props> = React.memo(({ rawHtml, outputLimited = false }) => {
-  const parsed = useMemo(() => inspectAndEnhanceHtml(rawHtml), [rawHtml]);
+export const TableOutputView: React.FC<Props> = React.memo(
+  ({
+    rawHtml,
+    outputLimited = false,
+    onExpandTruncated,
+    isExpandingTruncated = false,
+    isExpandedTruncated = false,
+  }) => {
+    const parsed = useMemo(() => inspectAndEnhanceHtml(rawHtml), [rawHtml]);
 
-  if (!parsed.hasTables) {
+    if (!parsed.hasTables) {
+      return (
+        <div
+          className="jp-rendered-html"
+          dangerouslySetInnerHTML={{ __html: parsed.sanitizedHtml }}
+        />
+      );
+    }
+
     return (
-      <div
-        className="jp-rendered-html"
-        dangerouslySetInnerHTML={{ __html: parsed.sanitizedHtml }}
-      />
+      <div className="sat-html-output space-y-2 min-w-0">
+        {parsed.blocks.map((block, idx) =>
+          block.type === 'table' ? (
+            <InteractiveTableCard
+              key={idx}
+              tableHtml={block.tableHtml}
+              virtualData={block.virtualData}
+              meta={block.meta}
+              preservedStylesHtml={parsed.preservedStylesHtml}
+              outputLimited={outputLimited}
+              onExpandTruncated={onExpandTruncated}
+              isExpandingTruncated={isExpandingTruncated}
+              isExpandedTruncated={isExpandedTruncated}
+            />
+          ) : (
+            <div
+              key={idx}
+              className="jp-rendered-html"
+              dangerouslySetInnerHTML={{ __html: block.html }}
+            />
+          )
+        )}
+      </div>
     );
   }
-
-  return (
-    <div className="sat-html-output space-y-2 min-w-0">
-      {parsed.blocks.map((block, idx) =>
-        block.type === 'table' ? (
-          <InteractiveTableCard
-            key={idx}
-            tableHtml={block.tableHtml}
-            meta={block.meta}
-            preservedStylesHtml={parsed.preservedStylesHtml}
-            outputLimited={outputLimited}
-          />
-        ) : (
-          <div
-            key={idx}
-            className="jp-rendered-html"
-            dangerouslySetInnerHTML={{ __html: block.html }}
-          />
-        )
-      )}
-    </div>
-  );
-});
+);

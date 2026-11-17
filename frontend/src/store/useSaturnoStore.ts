@@ -1,5 +1,16 @@
 import { create } from 'zustand';
 import { api, wsClient } from '../services/api';
+import {
+  deleteDraft,
+  deleteDraftsMatching,
+  flushDirtyDraftsSync,
+  isDraftStorageReady,
+  reconcileFileWithDraft,
+  reconcileNotebookWithDraft,
+  remapDraftPaths,
+  warmupDraftStorage,
+  writeTabDraft,
+} from '../services/draftStorage';
 import { loadNotebookView, loadTextFileView } from '../services/editorViews';
 import { normalizeThemeId } from '../themes';
 import { bootstrapConfig, persistAppearance } from '../services/bootstrap';
@@ -120,6 +131,8 @@ interface SaturnoStore {
   autoScrollOnRun: boolean;
   showModifiedTime: boolean;
   confirmKernelRestart: boolean;
+  autoSave: boolean;
+  autoSaveDelay: number;
   editorFontSize: number;
   tableOutputSettings: TableOutputSettings;
 
@@ -163,6 +176,8 @@ interface SaturnoStore {
   setAutoScrollOnRun: (v: boolean) => void;
   setShowModifiedTime: (v: boolean) => void;
   setConfirmKernelRestart: (v: boolean) => void;
+  setAutoSave: (v: boolean) => void;
+  setAutoSaveDelay: (ms: number) => void;
   setTableOutputSettings: (patch: Partial<TableOutputSettings>) => void;
   setShowFolderModal: (v: boolean) => void;
   openSettings: (section?: SettingsSection) => void;
@@ -203,7 +218,7 @@ interface SaturnoStore {
   setPaneWidths: (ratios: Record<string, number>) => void;
   openLauncher: (paneId?: string) => void;
   saveActiveTab: () => Promise<void>;
-  saveTabById: (tabId: string) => Promise<void>;
+  saveTabById: (tabId: string, options?: { silent?: boolean }) => Promise<void>;
   updateTextFileContent: (tabId: string, content: string) => void;
 
   // Notebook & Cells
@@ -279,6 +294,137 @@ function saveExpandedFolders(map: Record<string, boolean>) {
   }
 }
 
+function loadStoredAutoSave(): boolean {
+  if (bootstrapConfig?.auto_save !== undefined) return Boolean(bootstrapConfig.auto_save);
+  try {
+    const raw = window.localStorage.getItem('saturno_auto_save');
+    if (raw === 'false') return false;
+    if (raw === 'true') return true;
+  } catch {
+    // ignore
+  }
+  return true;
+}
+
+function loadStoredAutoSaveDelay(): number {
+  if (bootstrapConfig?.auto_save_delay) {
+    return Math.max(500, Math.min(60000, Number(bootstrapConfig.auto_save_delay)));
+  }
+  try {
+    const raw = Number(window.localStorage.getItem('saturno_auto_save_delay'));
+    if (Number.isFinite(raw) && raw >= 500) return Math.min(60000, raw);
+  } catch {
+    // ignore
+  }
+  return 2000;
+}
+
+function patchEntryModified(
+  files: FileEntry[],
+  folderChildren: Record<string, FileEntry[]>,
+  relPath: string,
+  modified?: string
+): { files?: FileEntry[]; folderChildren?: Record<string, FileEntry[]> } {
+  if (!modified) return {};
+  const slashIdx = relPath.lastIndexOf('/');
+  if (slashIdx === -1) {
+    const idx = files.findIndex((f) => f.path === relPath);
+    if (idx === -1 || files[idx].modified === modified) return {};
+    const nextFiles = [...files];
+    nextFiles[idx] = { ...nextFiles[idx], modified };
+    return { files: nextFiles };
+  }
+  const parent = relPath.slice(0, slashIdx);
+  const list = folderChildren[parent];
+  if (!list) return {};
+  const idx = list.findIndex((f) => f.path === relPath);
+  if (idx === -1 || list[idx].modified === modified) return {};
+  const nextList = [...list];
+  nextList[idx] = { ...nextList[idx], modified };
+  return { folderChildren: { ...folderChildren, [parent]: nextList } };
+}
+
+const draftTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const inFlightSaves = new Map<string, Promise<void>>();
+
+function cancelDraftTimer(tabId: string) {
+  const timer = draftTimers.get(tabId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    draftTimers.delete(tabId);
+  }
+}
+
+function cancelAutoSaveTimer(tabId: string) {
+  const timer = autoSaveTimers.get(tabId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    autoSaveTimers.delete(tabId);
+  }
+}
+
+function clearAllPersistenceTimers() {
+  for (const t of draftTimers.values()) clearTimeout(t);
+  for (const t of autoSaveTimers.values()) clearTimeout(t);
+  draftTimers.clear();
+  autoSaveTimers.clear();
+}
+
+function scheduleIdleWork(fn: () => void) {
+  if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(() => fn(), { timeout: 1000 });
+  } else {
+    fn();
+  }
+}
+
+function scheduleDraftWrite(tabId: string, delayMs = 350) {
+  cancelDraftTimer(tabId);
+  draftTimers.set(
+    tabId,
+    setTimeout(() => {
+      draftTimers.delete(tabId);
+      scheduleIdleWork(() => {
+        const state = useSaturnoStore.getState();
+        if (!state.workspaceRoot) return;
+        const tab = state.tabs.find((t) => t.id === tabId);
+        if (!tab || tab.kind === 'launcher' || tab.loading || !tab.dirty) return;
+        void writeTabDraft(state.workspaceRoot, tab);
+      });
+    }, delayMs)
+  );
+}
+
+function scheduleAutoSave(tabId: string, delayMs: number) {
+  cancelAutoSaveTimer(tabId);
+  autoSaveTimers.set(
+    tabId,
+    setTimeout(() => {
+      autoSaveTimers.delete(tabId);
+      const state = useSaturnoStore.getState();
+      if (!state.autoSave || !state.workspaceRoot) return;
+      const tab = state.tabs.find((t) => t.id === tabId);
+      if (!tab || tab.kind === 'launcher' || tab.loading || !tab.dirty) return;
+      if (tab.kind === 'file' && tab.truncated) return;
+      if (tab.kind === 'notebook' && tab.cells.some((c) => c.isRunning)) return;
+      void state.saveTabById(tabId, { silent: true });
+    }, delayMs)
+  );
+}
+
+function syncDirtyTabsTimers(state: SaturnoStore) {
+  if (!state.initialized || !state.workspaceRoot) return;
+  for (const tab of state.tabs) {
+    if (tab.kind === 'launcher' || tab.loading || !tab.dirty) continue;
+    if (tab.kind === 'file' && tab.truncated) continue;
+    if (tab.kind === 'notebook' && tab.cells.some((c) => c.isRunning)) continue;
+    if (state.autoSave && !autoSaveTimers.has(tab.id)) {
+      scheduleAutoSave(tab.id, state.autoSaveDelay);
+    }
+  }
+}
+
 export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   initialized: false,
   config: bootstrapConfig || null,
@@ -297,6 +443,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   autoScrollOnRun: bootstrapConfig?.auto_scroll_on_run ?? true,
   showModifiedTime: bootstrapConfig?.show_modified_time ?? true,
   confirmKernelRestart: bootstrapConfig?.confirm_kernel_restart ?? false,
+  autoSave: loadStoredAutoSave(),
+  autoSaveDelay: loadStoredAutoSaveDelay(),
   editorFontSize: bootstrapConfig?.editor_font_size || Number(window.localStorage.getItem('saturno_font_size')) || 14,
   tableOutputSettings: bootstrapConfig?.table_output
     ? normalizeTableOutputSettings(bootstrapConfig.table_output)
@@ -328,6 +476,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   initialize: async () => {
     if (get().initialized || initializing) return;
     initializing = true;
+    warmupDraftStorage();
     preloadWorkspaceEditors(get().workspaceRoot);
     wsClient.connect();
     wsClient.subscribe((msg) => get().handleWSMessage(msg));
@@ -361,6 +510,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         autoScrollOnRun: cfg.auto_scroll_on_run ?? true,
         showModifiedTime: cfg.show_modified_time ?? true,
         confirmKernelRestart: cfg.confirm_kernel_restart ?? false,
+        autoSave: cfg.auto_save ?? true,
+        autoSaveDelay: cfg.auto_save_delay || 2000,
         editorFontSize: fontSize,
         tableOutputSettings: cfg.table_output
           ? normalizeTableOutputSettings(cfg.table_output)
@@ -414,7 +565,10 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       set({ initialized: true, statusMessage: `Erro ao inicializar: ${err.message}` });
     } finally {
       initializing = false;
-      if (sessionPersistenceReady) saveWorkspaceSession(get());
+      if (sessionPersistenceReady) {
+        saveWorkspaceSession(get());
+        syncDirtyTabsTimers(get());
+      }
     }
   },
 
@@ -441,6 +595,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       autoScrollOnRun: updated.auto_scroll_on_run ?? s.autoScrollOnRun,
       showModifiedTime: updated.show_modified_time ?? s.showModifiedTime,
       confirmKernelRestart: updated.confirm_kernel_restart ?? s.confirmKernelRestart,
+      autoSave: updated.auto_save ?? s.autoSave,
+      autoSaveDelay: updated.auto_save_delay || s.autoSaveDelay,
       editorFontSize: updated.editor_font_size || s.editorFontSize,
       tableOutputSettings: updated.table_output
         ? normalizeTableOutputSettings(updated.table_output)
@@ -525,6 +681,30 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   setConfirmKernelRestart: (v) => {
     set({ confirmKernelRestart: v });
     api.updateConfig({ confirm_kernel_restart: v }).catch(() => {});
+  },
+
+  setAutoSave: (v) => {
+    try {
+      window.localStorage.setItem('saturno_auto_save', String(v));
+    } catch {
+      // ignore
+    }
+    set({
+      autoSave: v,
+      statusMessage: v ? 'Salvamento automático ativado' : 'Salvamento automático desativado',
+    });
+    api.updateConfig({ auto_save: v }).catch(() => {});
+  },
+
+  setAutoSaveDelay: (ms) => {
+    const clamped = Math.max(500, Math.min(60000, Math.round(ms)));
+    try {
+      window.localStorage.setItem('saturno_auto_save_delay', String(clamped));
+    } catch {
+      // ignore
+    }
+    set({ autoSaveDelay: clamped });
+    api.updateConfig({ auto_save_delay: clamped }).catch(() => {});
   },
 
   setTableOutputSettings: (patch) => {
@@ -680,7 +860,30 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
 
   switchWorkspace: async (newPath) => {
     if (restoringSession) return;
+    if (get().autoSave && hasUnsavedChanges(get().tabs)) {
+      const savableIds = get()
+        .tabs.filter(
+          (t) =>
+            t.kind !== 'launcher' &&
+            !t.loading &&
+            t.dirty &&
+            !(t.kind === 'file' && t.truncated)
+        )
+        .map((t) => t.id);
+      if (savableIds.length > 0) {
+        await Promise.allSettled(savableIds.map((id) => get().saveTabById(id, { silent: true })));
+      }
+    }
     if (hasUnsavedChanges(get().tabs) && !window.confirm('Há alterações não salvas. Trocar de pasta e descartá-las?')) return;
+    const prevWorkspaceRoot = get().workspaceRoot;
+    const discardedIds = get()
+      .tabs.filter((t) => t.kind !== 'launcher' && t.dirty)
+      .map((t) => t.id);
+    clearAllPersistenceTimers();
+    if (prevWorkspaceRoot && discardedIds.length > 0) {
+      const discardedSet = new Set(discardedIds);
+      void deleteDraftsMatching(prevWorkspaceRoot, (p) => discardedSet.has(p));
+    }
     saveWorkspaceSession(get());
     restoringSession = true;
     try {
@@ -718,6 +921,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     } finally {
       restoringSession = false;
       saveWorkspaceSession(get());
+      syncDirtyTabsTimers(get());
     }
   },
 
@@ -741,20 +945,31 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       return;
     }
 
+    const workspaceRoot = get().workspaceRoot;
     const [fileData] = await Promise.all([api.readFile(entry.path), loadTextFileView()]);
     const cleanContent = (fileData.content || '').replace(/\r\n/g, '\n');
+    const reconciled = await reconcileFileWithDraft({
+      workspaceRoot,
+      path: fileData.path,
+      diskContent: cleanContent,
+      diskModified: fileData.modified,
+      truncated: fileData.truncated,
+    });
     const newTab: WorkspaceTab = {
       kind: 'file',
       id: fileData.path,
       path: fileData.path,
       name: fileData.name,
-      content: cleanContent,
-      dirty: false,
+      content: reconciled.content,
+      dirty: reconciled.dirty,
+      diskModified: fileData.modified,
+      truncated: fileData.truncated,
     };
 
     if (options?.sideBySide) {
       set((s) => ({
         tabs: s.tabs.some((t) => t.id === newTab.id) ? s.tabs : [...s.tabs, newTab],
+        ...(reconciled.restored ? { statusMessage: `Rascunho recuperado: ${fileData.name}` } : {}),
       }));
       get().splitTab(newTab.id, options.targetPaneId, 'right');
       return;
@@ -778,6 +993,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         panes: nextPanes,
         activePaneId: targetPaneId,
         activeTabId: newTab.id,
+        ...(reconciled.restored ? { statusMessage: `Rascunho recuperado: ${fileData.name}` } : {}),
       };
     });
   },
@@ -793,31 +1009,44 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       return;
     }
 
+    const workspaceRoot = get().workspaceRoot;
+    const collapseOutputs = get().config?.output_display === 'collapsed';
     set({ statusMessage: `Abrindo ${relPath.split('/').pop()}…` });
     let nb;
     try { [nb] = await Promise.all([api.readNotebook(relPath), loadNotebookView()]); }
     catch (error) { set({ statusMessage: `Erro ao abrir notebook: ${String(error)}` }); throw error; }
-    const cells: NotebookCellData[] = nb.cells.map((c: any) => {
+    const diskCells: NotebookCellData[] = nb.cells.map((c: any) => {
       const cleanSrc = (c.source || '').replace(/\r\n/g, '\n');
       return {
         ...c,
         source: cleanSrc,
-        outputCollapsed: get().config?.output_display === 'collapsed',
+        outputCollapsed: collapseOutputs,
         isRunning: false,
         markdownRendered: c.cell_type === 'markdown' && Boolean(cleanSrc.trim()),
       };
     });
+    const reconciled = await reconcileNotebookWithDraft({
+      workspaceRoot,
+      path: nb.path,
+      diskCells,
+      diskMetadata: nb.metadata || {},
+      diskModified: nb.modified,
+      collapseOutputs,
+    });
+    const cells = reconciled.cells;
+    const preferredCellId = reconciled.activeCellId;
     const newTab: OpenNotebookTab = {
       kind: 'notebook',
       id: nb.path,
       path: nb.path,
       name: nb.name,
       cells,
-      metadata: nb.metadata || {},
-      dirty: false,
+      metadata: reconciled.metadata,
+      dirty: reconciled.dirty,
+      diskModified: nb.modified,
       kernelStatus: nb.kernel_status || 'not_started',
       variables: nb.variables || [],
-      activeCellId: cells[0]?.id || '',
+      activeCellId: cells.some((c) => c.id === preferredCellId) ? preferredCellId! : cells[0]?.id || '',
     };
 
     if (options?.sideBySide) {
@@ -850,7 +1079,9 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       });
     }
 
-    set({ statusMessage: 'Pronto' });
+    set({
+      statusMessage: reconciled.restored ? `Rascunho recuperado: ${nb.name}` : 'Pronto',
+    });
 
     // Defer kernel warm-up slightly so UI rendering and file clicks have zero contention
     window.setTimeout(() => {
@@ -915,6 +1146,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
             name: fileData.name,
             content: normalizedContent,
             dirty: false,
+            diskModified: fileData.modified,
+            truncated: fileData.truncated,
           },
         ],
         panes: nextPanes,
@@ -938,7 +1171,15 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   renameEntry: async (oldPath, newName) => {
+    const workspaceRoot = get().workspaceRoot;
     const res = await api.renameEntry(oldPath, newName);
+    for (const t of get().tabs) {
+      if (t.kind !== 'launcher' && remapPathPrefix(t.id, oldPath, res.new_path)) {
+        cancelDraftTimer(t.id);
+        cancelAutoSaveTimer(t.id);
+      }
+    }
+    void remapDraftPaths(workspaceRoot, (p) => remapPathPrefix(p, oldPath, res.new_path));
     await get().refreshFiles();
     set((s) => {
       const nextExpanded: Record<string, boolean> = {};
@@ -1008,7 +1249,9 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   deleteEntry: async (relPath) => {
+    const workspaceRoot = get().workspaceRoot;
     await api.deleteEntry(relPath);
+    void deleteDraftsMatching(workspaceRoot, (p) => isPathOrDescendant(p, relPath));
     const affectedTabIds = get()
       .tabs.filter((t) => t.kind !== 'launcher' && isPathOrDescendant(t.id, relPath))
       .map((t) => t.id);
@@ -1040,7 +1283,11 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
 
   deleteBatchEntries: async (paths) => {
     if (!paths.length) return;
+    const workspaceRoot = get().workspaceRoot;
     const res = await api.deleteBatch(paths);
+    void deleteDraftsMatching(workspaceRoot, (p) =>
+      paths.some((deleted) => isPathOrDescendant(p, deleted))
+    );
     const affectedTabIds = get()
       .tabs.filter(
         (t) =>
@@ -1078,6 +1325,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
 
   moveEntries: async (paths, targetFolder) => {
     if (!paths.length) return;
+    const workspaceRoot = get().workspaceRoot;
     const res = await api.moveEntries(paths, targetFolder);
     if (targetFolder) {
       get().setFolderExpanded(targetFolder, true);
@@ -1095,6 +1343,14 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         });
       }
     }
+    for (const oldId of moveMap.keys()) {
+      cancelDraftTimer(oldId);
+      cancelAutoSaveTimer(oldId);
+    }
+    void remapDraftPaths(workspaceRoot, (p) => {
+      const hit = res.moved.find((m) => isPathOrDescendant(p, m.old_path));
+      return hit ? remapPathPrefix(p, hit.old_path, hit.new_path) : null;
+    });
     set((s) => {
       const nextExpanded: Record<string, boolean> = {};
       for (const [k, v] of Object.entries(s.expandedFolders)) {
@@ -1231,6 +1487,11 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       let nextInlineAI = s.inlineAI;
       let nextDeletedStack = s.deletedCellStack;
       if (!stillReferenced) {
+        cancelDraftTimer(id);
+        cancelAutoSaveTimer(id);
+        if (s.workspaceRoot) {
+          void deleteDraft(s.workspaceRoot, id);
+        }
         const closingTab = s.tabs.find((t) => t.id === id);
         if (closingTab?.kind === 'notebook') {
           let aiMutated = false;
@@ -1469,31 +1730,116 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     await get().saveTabById(get().activeTabId);
   },
 
-  saveTabById: async (tabId) => {
+  saveTabById: async (tabId, options) => {
+    const silent = Boolean(options?.silent);
     const workspaceRoot = get().workspaceRoot;
-    const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab || (tab.kind !== 'launcher' && tab.loading)) return;
-    if (tab.kind === 'notebook') {
-      await api.saveNotebook(tab.path, tab.cells, tab.metadata);
+    if (!workspaceRoot) return;
+    const inflightKey = `${workspaceRoot}\0${tabId}`;
+    const existingFlight = inFlightSaves.get(inflightKey);
+    if (existingFlight) {
+      await existingFlight;
       if (get().workspaceRoot !== workspaceRoot) return;
-      set((s) => ({
-        tabs: s.tabs.map((t) =>
-          t.id === tab.id && t.kind === 'notebook' && t.cells === tab.cells && t.metadata === tab.metadata ? { ...t, dirty: false } : t
-        ),
-        statusMessage: `Salvo: ${tab.name}`,
-      }));
-      get().refreshFiles();
-    } else if (tab.kind === 'file') {
-      await api.saveFile(tab.path, tab.content);
-      if (get().workspaceRoot !== workspaceRoot) return;
-      set((s) => ({
-        tabs: s.tabs.map((t) =>
-          t.id === tab.id && t.kind === 'file' && t.content === tab.content ? { ...t, dirty: false } : t
-        ),
-        statusMessage: `Arquivo salvo: ${tab.name}`,
-      }));
-      get().refreshFiles();
+      const after = get().tabs.find((t) => t.id === tabId);
+      if (!after || after.kind === 'launcher' || after.loading) return;
+      if (silent && !after.dirty) return;
     }
+
+    const runSave = async () => {
+      cancelAutoSaveTimer(tabId);
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab || tab.kind === 'launcher' || tab.loading) return;
+      if (silent && !tab.dirty) return;
+      if (silent && tab.kind === 'file' && tab.truncated) return;
+
+      try {
+        if (tab.kind === 'notebook') {
+          const res = await api.saveNotebook(tab.path, tab.cells, tab.metadata);
+          if (get().workspaceRoot !== workspaceRoot) return;
+          let becameClean = false;
+          set((s) => {
+            const nextTabs = s.tabs.map((t) => {
+              if (t.id !== tab.id || t.kind !== 'notebook') return t;
+              const unchanged = t.cells === tab.cells && t.metadata === tab.metadata;
+              if (unchanged) becameClean = true;
+              return {
+                ...t,
+                diskModified: res.modified || t.diskModified,
+                dirty: unchanged ? false : t.dirty,
+              };
+            });
+            const treePatch = s.showModifiedTime
+              ? patchEntryModified(s.files, s.folderChildren, tab.path, res.modified)
+              : {};
+            return {
+              tabs: nextTabs,
+              ...treePatch,
+              ...(silent ? {} : { statusMessage: `Salvo: ${tab.name}` }),
+            };
+          });
+          if (becameClean) {
+            cancelDraftTimer(tab.id);
+            void deleteDraft(workspaceRoot, tab.path);
+          } else if (get().autoSave) {
+            scheduleAutoSave(tab.id, get().autoSaveDelay);
+          }
+          if (!silent) {
+            void get().refreshFiles();
+          }
+        } else if (tab.kind === 'file') {
+          const res = await api.saveFile(tab.path, tab.content);
+          if (get().workspaceRoot !== workspaceRoot) return;
+          let becameClean = false;
+          set((s) => {
+            const nextTabs = s.tabs.map((t) => {
+              if (t.id !== tab.id || t.kind !== 'file') return t;
+              const unchanged = t.content === tab.content;
+              if (unchanged) becameClean = true;
+              return {
+                ...t,
+                diskModified: res.modified || t.diskModified,
+                dirty: unchanged ? false : t.dirty,
+              };
+            });
+            const treePatch = s.showModifiedTime
+              ? patchEntryModified(s.files, s.folderChildren, tab.path, res.modified)
+              : {};
+            return {
+              tabs: nextTabs,
+              ...treePatch,
+              ...(silent ? {} : { statusMessage: `Arquivo salvo: ${tab.name}` }),
+            };
+          });
+          if (becameClean) {
+            cancelDraftTimer(tab.id);
+            void deleteDraft(workspaceRoot, tab.path);
+          } else if (get().autoSave) {
+            scheduleAutoSave(tab.id, get().autoSaveDelay);
+          }
+          if (!silent) {
+            void get().refreshFiles();
+          }
+        }
+      } catch (err: any) {
+        const latest = get().tabs.find((t) => t.id === tabId);
+        const savedLocally =
+          latest && latest.kind !== 'launcher' && !latest.loading
+            ? await writeTabDraft(workspaceRoot, latest)
+            : false;
+        set({
+          statusMessage: savedLocally
+            ? `Servidor indisponível — rascunho de "${tab.name}" protegido localmente`
+            : `Erro ao salvar ${tab.name}: ${err?.message || String(err)}`,
+        });
+      }
+    };
+
+    const flight = runSave().finally(() => {
+      if (inFlightSaves.get(inflightKey) === flight) {
+        inFlightSaves.delete(inflightKey);
+      }
+    });
+    inFlightSaves.set(inflightKey, flight);
+    await flight;
   },
 
   updateTextFileContent: (tabId, content) => {
@@ -2498,13 +2844,75 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 }));
 
-// Register independently of React mounts; native dialogs also cover reload and
-// browser-tab closure. The browser supplies the confirmation wording.
+function flushOnPageLifecycle(includeKeepaliveSave: boolean) {
+  const state = useSaturnoStore.getState();
+  if (!state.initialized || !state.workspaceRoot) return;
+  flushDirtyDraftsSync(state.workspaceRoot, state.tabs);
+
+  if (!includeKeepaliveSave || !state.autoSave || typeof fetch !== 'function') return;
+  for (const tab of state.tabs) {
+    if (tab.kind === 'launcher' || tab.loading || !tab.dirty) continue;
+    try {
+      if (tab.kind === 'file') {
+        if (tab.truncated) continue;
+        const body = JSON.stringify({ path: tab.path, content: tab.content });
+        if (body.length < 60_000) {
+          void fetch('/api/fs/file/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            keepalive: true,
+          }).catch(() => {});
+        }
+      } else if (tab.kind === 'notebook' && !tab.cells.some((c) => c.isRunning)) {
+        const body = JSON.stringify({
+          path: tab.path,
+          cells: tab.cells,
+          metadata: tab.metadata,
+        });
+        if (body.length < 60_000) {
+          void fetch('/api/fs/notebook/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            keepalive: true,
+          }).catch(() => {});
+        }
+      }
+    } catch {
+      // ignore unload serialization errors
+    }
+  }
+}
+
+// Register independently of React mounts; flush drafts on tab hide/close, and
+// fall back to native confirmation only when IndexedDB hot-exit is unavailable.
 const warnBeforeUnload = (event: BeforeUnloadEvent) => {
-  if (!hasUnsavedChanges(useSaturnoStore.getState().tabs)) return;
+  const state = useSaturnoStore.getState();
+  if (!hasUnsavedChanges(state.tabs)) return;
+  flushOnPageLifecycle(true);
+  if (isDraftStorageReady()) return;
   event.preventDefault();
   event.returnValue = '';
 };
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => flushOnPageLifecycle(true));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'hidden') return;
+    const state = useSaturnoStore.getState();
+    if (!state.initialized || !state.workspaceRoot) return;
+    flushDirtyDraftsSync(state.workspaceRoot, state.tabs);
+    if (!state.autoSave) return;
+    for (const tab of state.tabs) {
+      if (tab.kind === 'launcher' || tab.loading || !tab.dirty) continue;
+      if (tab.kind === 'file' && tab.truncated) continue;
+      if (tab.kind === 'notebook' && tab.cells.some((c) => c.isRunning)) continue;
+      void state.saveTabById(tab.id, { silent: true });
+    }
+  });
+}
+
 let unloadWarningEnabled = false;
 useSaturnoStore.subscribe((state, previous) => {
   const dirty = hasUnsavedChanges(state.tabs);
@@ -2513,8 +2921,94 @@ useSaturnoStore.subscribe((state, previous) => {
     if (dirty) window.addEventListener('beforeunload', warnBeforeUnload);
     else window.removeEventListener('beforeunload', warnBeforeUnload);
   }
-  if (sessionPersistenceReady && !initializing && !restoringSession && state.initialized &&
-      (state.tabs !== previous.tabs || state.panes !== previous.panes || state.activePaneId !== previous.activePaneId)) {
-    saveWorkspaceSession(state);
+
+  if (!initializing && !restoringSession && state.initialized) {
+    if (sessionPersistenceReady &&
+        (state.tabs !== previous.tabs || state.panes !== previous.panes || state.activePaneId !== previous.activePaneId)) {
+      saveWorkspaceSession(state);
+    }
+
+    if (!state.autoSave && previous.autoSave) {
+      for (const timer of autoSaveTimers.values()) clearTimeout(timer);
+      autoSaveTimers.clear();
+    } else if (state.autoSave && (!previous.autoSave || state.autoSaveDelay !== previous.autoSaveDelay)) {
+      for (const timer of autoSaveTimers.values()) clearTimeout(timer);
+      autoSaveTimers.clear();
+      syncDirtyTabsTimers(state);
+    }
+
+    if (state.tabs !== previous.tabs && state.workspaceRoot) {
+      const currentIds = new Set(state.tabs.map((t) => t.id));
+      for (const tid of draftTimers.keys()) {
+        if (!currentIds.has(tid)) cancelDraftTimer(tid);
+      }
+      for (const tid of autoSaveTimers.keys()) {
+        if (!currentIds.has(tid)) cancelAutoSaveTimer(tid);
+      }
+
+      for (const tab of state.tabs) {
+        if (tab.kind === 'launcher' || tab.loading) continue;
+        if (!tab.dirty) {
+          cancelDraftTimer(tab.id);
+          cancelAutoSaveTimer(tab.id);
+          continue;
+        }
+        const prevTab = previous.tabs.find((t) => t.id === tab.id);
+        if (tab === prevTab) continue;
+
+        if (tab.kind === 'file') {
+          if (tab.truncated) continue;
+          const changed =
+            !prevTab ||
+            prevTab.kind !== 'file' ||
+            tab.content !== prevTab.content ||
+            !prevTab.dirty;
+          if (changed) {
+            scheduleDraftWrite(tab.id, 350);
+            if (state.autoSave) {
+              scheduleAutoSave(tab.id, state.autoSaveDelay);
+            }
+          }
+        } else if (tab.kind === 'notebook') {
+          const isExecuting = tab.cells.some((c) => c.isRunning);
+          const wasExecuting =
+            prevTab?.kind === 'notebook' && prevTab.cells.some((c) => c.isRunning);
+
+          if (isExecuting) {
+            cancelAutoSaveTimer(tab.id);
+            const codeEditedWhileRunning =
+              !prevTab ||
+              prevTab.kind !== 'notebook' ||
+              tab.cells.length !== prevTab.cells.length ||
+              tab.cells.some(
+                (c, idx) =>
+                  c.source !== prevTab.cells[idx]?.source ||
+                  c.cell_type !== prevTab.cells[idx]?.cell_type
+              );
+            if (codeEditedWhileRunning) {
+              scheduleDraftWrite(tab.id, 1500);
+            }
+          } else if (wasExecuting) {
+            scheduleDraftWrite(tab.id, 150);
+            if (state.autoSave) {
+              scheduleAutoSave(tab.id, Math.min(800, state.autoSaveDelay));
+            }
+          } else {
+            const contentChanged =
+              !prevTab ||
+              prevTab.kind !== 'notebook' ||
+              tab.cells !== prevTab.cells ||
+              tab.metadata !== prevTab.metadata ||
+              !prevTab.dirty;
+            if (contentChanged) {
+              scheduleDraftWrite(tab.id, 350);
+              if (state.autoSave) {
+                scheduleAutoSave(tab.id, state.autoSaveDelay);
+              }
+            }
+          }
+        }
+      }
+    }
   }
 });

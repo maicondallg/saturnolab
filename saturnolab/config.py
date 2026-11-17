@@ -61,6 +61,8 @@ class SaturnoConfig(BaseModel):
     output_display: str = "expanded"
     show_modified_time: bool = True
     confirm_kernel_restart: bool = False
+    auto_save: bool = True
+    auto_save_delay: int = 2000
     editor_font_size: int = 14
     table_output: TableOutputSettings = Field(default_factory=TableOutputSettings)
     providers: dict[str, ProviderSettings] = Field(
@@ -193,6 +195,10 @@ class ConfigManager:
             self._config.show_modified_time = bool(patch["show_modified_time"])
         if "confirm_kernel_restart" in patch:
             self._config.confirm_kernel_restart = bool(patch["confirm_kernel_restart"])
+        if "auto_save" in patch:
+            self._config.auto_save = bool(patch["auto_save"])
+        if "auto_save_delay" in patch and isinstance(patch["auto_save_delay"], (int, float)):
+            self._config.auto_save_delay = max(500, min(60000, int(patch["auto_save_delay"])))
         if "editor_font_size" in patch and isinstance(patch["editor_font_size"], (int, float)):
             self._config.editor_font_size = max(11, min(22, int(patch["editor_font_size"])))
         if "table_output" in patch and isinstance(patch["table_output"], dict):

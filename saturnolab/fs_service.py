@@ -119,6 +119,13 @@ def _sanitize_cell_id(raw_id: Any, used_ids: set[str]) -> str:
     return cand
 
 
+def _file_modified_iso(target: Path) -> str:
+    try:
+        return datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return datetime.now(timezone.utc).isoformat()
+
+
 def _atomic_write_text(target: Path, content: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     existing_mode: int | None = None
@@ -281,6 +288,7 @@ def read_notebook(workspace_root: Path, rel_path: str) -> dict[str, Any]:
         "name": target.name,
         "metadata": dict(raw_nb.get("metadata", {})),
         "cells": cells,
+        "modified": _file_modified_iso(target),
     }
 
 
@@ -353,7 +361,7 @@ def save_notebook(
     return {
         "saved": True,
         "path": str(target.relative_to(workspace_root.resolve())).replace("\\", "/"),
-        "modified": datetime.now(timezone.utc).isoformat(),
+        "modified": _file_modified_iso(target),
     }
 
 
@@ -457,6 +465,7 @@ def read_text_file(workspace_root: Path, rel_path: str, max_bytes: int = 512_000
         "content": content,
         "truncated": truncated,
         "size": size,
+        "modified": _file_modified_iso(target),
     }
 
 
@@ -466,6 +475,7 @@ def write_text_file(workspace_root: Path, rel_path: str, content: str) -> dict[s
     return {
         "saved": True,
         "path": str(target.relative_to(workspace_root.resolve())).replace("\\", "/"),
+        "modified": _file_modified_iso(target),
     }
 
 

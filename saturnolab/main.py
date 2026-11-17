@@ -17,7 +17,12 @@ from pydantic import BaseModel
 
 from . import __version__, fs_service
 from .config import config_manager
-from .kernel_manager import kernel_registry
+from .kernel_manager import (
+    _build_completion_payload,
+    _jedi_complete_fallback,
+    _jedi_inspect_fallback,
+    kernel_registry,
+)
 from .llm_service import close_http_client, stream_inline_generation, strip_markdown_fences
 
 _LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$", re.IGNORECASE)
@@ -168,6 +173,27 @@ class DeleteBatchRequest(BaseModel):
 
 class KernelActionRequest(BaseModel):
     notebook_path: str
+
+
+class KernelCompleteRequest(BaseModel):
+    notebook_path: str = ""
+    code: str
+    cursor_pos: int
+    context_code: str = ""
+
+
+class KernelInspectRequest(BaseModel):
+    notebook_path: str = ""
+    code: str
+    cursor_pos: int
+    detail_level: int = 0
+    context_code: str = ""
+
+
+class KernelExpandOutputRequest(BaseModel):
+    notebook_path: str
+    execution_count: int | None = None
+    code: str = ""
 
 
 @app.get("/api/health")
@@ -434,6 +460,57 @@ async def api_shutdown_kernel(req: KernelActionRequest) -> dict[str, Any]:
     return {"shutdown": True, "notebook_path": req.notebook_path}
 
 
+@app.post("/api/kernels/complete")
+async def api_complete_code(req: KernelCompleteRequest) -> dict[str, Any]:
+    ws = config_manager.get_workspace_path()
+    session = kernel_registry.get_existing(ws, req.notebook_path) if req.notebook_path else None
+    if session:
+        res = await session.complete(req.code, req.cursor_pos)
+        if res.get("options"):
+            return res
+
+    prefix = f"{req.context_code.rstrip()}\n" if req.context_code.strip() else ""
+    offset_shift = len(prefix)
+    full_code = prefix + req.code
+    full_cursor = offset_shift + max(0, min(len(req.code), req.cursor_pos))
+    jedi_res = await run_in_threadpool(_jedi_complete_fallback, full_code, full_cursor)
+    c_start = max(0, jedi_res["cursor_start"] - offset_shift)
+    c_end = max(0, jedi_res["cursor_end"] - offset_shift)
+    return _build_completion_payload(
+        code=req.code,
+        cursor_pos=max(0, min(len(req.code), req.cursor_pos)),
+        cursor_start=c_start,
+        cursor_end=c_end,
+        matches=jedi_res["matches"],
+        exp_types=jedi_res["exp_types"],
+        variables_cache=session.variables_cache if session else [],
+    )
+
+
+@app.post("/api/kernels/inspect")
+async def api_inspect_code(req: KernelInspectRequest) -> dict[str, Any]:
+    ws = config_manager.get_workspace_path()
+    session = kernel_registry.get_existing(ws, req.notebook_path) if req.notebook_path else None
+    if session:
+        res = await session.inspect_symbol(req.code, req.cursor_pos, req.detail_level)
+        if res.get("found"):
+            return res
+
+    prefix = f"{req.context_code.rstrip()}\n" if req.context_code.strip() else ""
+    full_code = prefix + req.code
+    full_cursor = len(prefix) + max(0, min(len(req.code), req.cursor_pos))
+    return await run_in_threadpool(_jedi_inspect_fallback, full_code, full_cursor)
+
+
+@app.post("/api/kernels/expand-output")
+async def api_expand_output(req: KernelExpandOutputRequest) -> dict[str, Any]:
+    ws = config_manager.get_workspace_path()
+    session = kernel_registry.get_existing(ws, req.notebook_path)
+    if not session:
+        return {"found": False}
+    return await session.expand_output(req.execution_count, req.code)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     if not _is_allowed_ws_origin(ws):
@@ -626,7 +703,7 @@ async def serve_spa(full_path: str):
                 "theme", "active_provider", "default_ai_apply_mode", "include_kernel_variables",
                 "notebook_layout", "sidebar_position", "sidebar_width", "editor_font_size",
                 "show_line_numbers", "auto_scroll_on_run", "show_modified_time",
-                "confirm_kernel_restart", "output_display",
+                "confirm_kernel_restart", "auto_save", "auto_save_delay", "output_display",
             )
             bootstrap = {field: getattr(cfg, field) for field in fields}
             bootstrap.update(

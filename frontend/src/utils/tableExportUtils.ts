@@ -1,4 +1,8 @@
-import { classifyCellValue, extractTableDelimited } from './htmlTableUtils';
+import {
+  classifyCellValue,
+  extractTableDelimited,
+  VirtualExportSource,
+} from './htmlTableUtils';
 
 export type ExportScope = 'displayed' | 'full';
 
@@ -96,6 +100,7 @@ export function ensureReadableStylerContrast(table: HTMLTableElement): void {
 
   for (const tb of Array.from(table.tBodies)) {
     for (const tr of Array.from(tb.rows)) {
+      if (tr.getAttribute('data-sat-spacer') === 'true') continue;
       const trBg = parseCssColor(window.getComputedStyle(tr).backgroundColor);
       for (const cell of Array.from(tr.cells)) {
         if (cell.getAttribute('data-sat-auto-contrast') === 'true') {
@@ -131,7 +136,7 @@ export function getViewportVisibleRows(
   const allVisibleRows: HTMLTableRowElement[] = [];
   for (const tb of Array.from(table.tBodies)) {
     for (const tr of Array.from(tb.rows)) {
-      if (!tr.hidden) {
+      if (!tr.hidden && tr.getAttribute('data-sat-spacer') !== 'true') {
         allVisibleRows.push(tr);
       }
     }
@@ -177,18 +182,21 @@ export function downloadTableCsv(
   scrollEl: HTMLElement | null,
   scope: ExportScope,
   hasFilter: boolean,
-  filename = 'tabela.csv'
+  filename = 'tabela.csv',
+  virtualSource?: VirtualExportSource
 ): void {
   const useViewportSubset =
     scope === 'displayed' &&
     !hasFilter &&
     Boolean(scrollEl && scrollEl.scrollHeight > scrollEl.clientHeight + 4);
 
-  const visibleRowSet = useViewportSubset ? getViewportVisibleRows(table, scrollEl) : undefined;
+  const visibleRowSet =
+    !virtualSource || useViewportSubset ? (useViewportSubset ? getViewportVisibleRows(table, scrollEl) : undefined) : undefined;
   const csv = extractTableDelimited(table, 'csv', {
     includeHiddenRows: scope === 'full',
     includeHiddenCols: scope === 'full',
     visibleRowSet,
+    virtualSource: useViewportSubset ? undefined : virtualSource,
   });
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
   triggerBlobDownload(blob, filename);
@@ -320,11 +328,19 @@ function excelColName(colIndexZeroBased: number): string {
   return name;
 }
 
+function extractInlineCssProp(styleStr: string | undefined, propName: string): string | null {
+  if (!styleStr) return null;
+  const re = new RegExp(`(?:^|;)\\s*${propName}\\s*:\\s*([^;]+)`, 'i');
+  const m = styleStr.match(re);
+  return m ? m[1].trim() : null;
+}
+
 export function buildTableXlsxBytes(
   table: HTMLTableElement,
   scrollEl: HTMLElement | null,
   scope: ExportScope,
-  hasFilter: boolean
+  hasFilter: boolean,
+  virtualSource?: VirtualExportSource
 ): Uint8Array {
   const includeHiddenRows = scope === 'full';
   const includeHiddenCols = scope === 'full';
@@ -332,17 +348,6 @@ export function buildTableXlsxBytes(
     scope === 'displayed' &&
     !hasFilter &&
     Boolean(scrollEl && scrollEl.scrollHeight > scrollEl.clientHeight + 4);
-  const visibleRowSet = useViewportSubset ? getViewportVisibleRows(table, scrollEl) : undefined;
-
-  const viewport = table.closest('.sat-table-viewport') as HTMLElement | null;
-  const baseBg =
-    typeof window !== 'undefined' && window.getComputedStyle
-      ? parseCssColor(
-          viewport
-            ? window.getComputedStyle(viewport).backgroundColor
-            : window.getComputedStyle(table).backgroundColor
-        )
-      : null;
 
   interface CellExportItem {
     text: string;
@@ -353,47 +358,95 @@ export function buildTableXlsxBytes(
 
   const rows: CellExportItem[][] = [];
 
-  const collectRowCells = (tr: HTMLTableRowElement, isHeader: boolean): CellExportItem[] => {
-    const trBg =
-      !isHeader && typeof window !== 'undefined' && window.getComputedStyle
-        ? parseCssColor(window.getComputedStyle(tr).backgroundColor)
-        : null;
+  if (virtualSource && !useViewportSubset) {
+    const activeCols = includeHiddenCols
+      ? virtualSource.colOrder
+      : virtualSource.colOrder.filter((c) => !virtualSource.hiddenCols.has(c));
 
-    return Array.from(tr.cells)
-      .filter((c) => includeHiddenCols || (!c.hidden && c.getAttribute('data-sat-col-hidden') !== 'true'))
-      .map((cell) => {
-        const text = (cell.textContent || '').trim();
-        let bgArgb: string | null = null;
-        let fgArgb: string | null = null;
+    for (const hRow of virtualSource.headerRows) {
+      const mapped =
+        hRow.length === virtualSource.colOrder.length
+          ? activeCols.map((c) => hRow[c] ?? '')
+          : hRow;
+      rows.push(mapped.map((text) => ({ text, isHeader: true, bgArgb: null, fgArgb: null })));
+    }
 
-        if (!isHeader && typeof window !== 'undefined' && window.getComputedStyle) {
-          const cs = window.getComputedStyle(cell);
-          const cBg = parseCssColor(cs.backgroundColor);
-          const effectiveBg = cBg && cBg.a > 0.35 ? cBg : trBg && !sameRgb(trBg, baseBg) ? trBg : null;
-          if (effectiveBg && !sameRgb(effectiveBg, baseBg)) {
-            bgArgb = rgbToArgbHex(effectiveBg);
-            const cFg = parseCssColor(cs.color);
-            if (cFg) {
-              fgArgb = rgbToArgbHex(cFg);
+    for (const vRow of virtualSource.rows) {
+      const rowBg = parseCssColor(extractInlineCssProp(vRow.rowStyle, 'background-color'));
+      rows.push(
+        activeCols.map((c) => {
+          const text = vRow.cells[c] ?? '';
+          const cStyle = vRow.cellStyles?.[c]?.style;
+          let bgArgb: string | null = null;
+          let fgArgb: string | null = null;
+          if (cStyle || rowBg) {
+            const cBg = parseCssColor(extractInlineCssProp(cStyle, 'background-color'));
+            const effBg = cBg || rowBg;
+            if (effBg) {
+              bgArgb = rgbToArgbHex(effBg);
+              const cFg = parseCssColor(extractInlineCssProp(cStyle, 'color'));
+              if (cFg) fgArgb = rgbToArgbHex(cFg);
             }
           }
-        }
-        return { text, isHeader, bgArgb, fgArgb };
-      });
-  };
-
-  if (table.tHead) {
-    for (const tr of Array.from(table.tHead.rows)) {
-      if (tr.getAttribute('data-sat-dtype-row') === 'true') continue;
-      rows.push(collectRowCells(tr, true));
+          return { text, isHeader: false, bgArgb, fgArgb };
+        })
+      );
     }
-  }
+  } else {
+    const visibleRowSet = useViewportSubset ? getViewportVisibleRows(table, scrollEl) : undefined;
+    const viewport = table.closest('.sat-table-viewport') as HTMLElement | null;
+    const baseBg =
+      typeof window !== 'undefined' && window.getComputedStyle
+        ? parseCssColor(
+            viewport
+              ? window.getComputedStyle(viewport).backgroundColor
+              : window.getComputedStyle(table).backgroundColor
+          )
+        : null;
 
-  for (const tb of Array.from(table.tBodies)) {
-    for (const tr of Array.from(tb.rows)) {
-      if (!includeHiddenRows && tr.hidden) continue;
-      if (visibleRowSet && !visibleRowSet.has(tr)) continue;
-      rows.push(collectRowCells(tr, false));
+    const collectRowCells = (tr: HTMLTableRowElement, isHeader: boolean): CellExportItem[] => {
+      const trBg =
+        !isHeader && typeof window !== 'undefined' && window.getComputedStyle
+          ? parseCssColor(window.getComputedStyle(tr).backgroundColor)
+          : null;
+
+      return Array.from(tr.cells)
+        .filter((c) => includeHiddenCols || (!c.hidden && c.getAttribute('data-sat-col-hidden') !== 'true'))
+        .map((cell) => {
+          const text = (cell.textContent || '').trim();
+          let bgArgb: string | null = null;
+          let fgArgb: string | null = null;
+
+          if (!isHeader && typeof window !== 'undefined' && window.getComputedStyle) {
+            const cs = window.getComputedStyle(cell);
+            const cBg = parseCssColor(cs.backgroundColor);
+            const effectiveBg = cBg && cBg.a > 0.35 ? cBg : trBg && !sameRgb(trBg, baseBg) ? trBg : null;
+            if (effectiveBg && !sameRgb(effectiveBg, baseBg)) {
+              bgArgb = rgbToArgbHex(effectiveBg);
+              const cFg = parseCssColor(cs.color);
+              if (cFg) {
+                fgArgb = rgbToArgbHex(cFg);
+              }
+            }
+          }
+          return { text, isHeader, bgArgb, fgArgb };
+        });
+    };
+
+    if (table.tHead) {
+      for (const tr of Array.from(table.tHead.rows)) {
+        if (tr.getAttribute('data-sat-dtype-row') === 'true') continue;
+        rows.push(collectRowCells(tr, true));
+      }
+    }
+
+    for (const tb of Array.from(table.tBodies)) {
+      for (const tr of Array.from(tb.rows)) {
+        if (tr.getAttribute('data-sat-spacer') === 'true') continue;
+        if (!includeHiddenRows && tr.hidden) continue;
+        if (visibleRowSet && !visibleRowSet.has(tr)) continue;
+        rows.push(collectRowCells(tr, false));
+      }
     }
   }
 
@@ -565,9 +618,10 @@ export function downloadTableXlsx(
   scrollEl: HTMLElement | null,
   scope: ExportScope,
   hasFilter: boolean,
-  filename = 'tabela.xlsx'
+  filename = 'tabela.xlsx',
+  virtualSource?: VirtualExportSource
 ): void {
-  const bytes = buildTableXlsxBytes(table, scrollEl, scope, hasFilter);
+  const bytes = buildTableXlsxBytes(table, scrollEl, scope, hasFilter, virtualSource);
   const blob = new Blob([bytes], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
@@ -776,12 +830,17 @@ function paintCellOnCanvas(
   ctx.restore();
 }
 
+const MAX_PNG_EXPORT_ROWS = 400;
+
 export async function renderTableToPngBlob(
   viewportEl: HTMLElement,
   scrollEl: HTMLElement,
   table: HTMLTableElement,
   preservedStylesHtml: string,
-  scope: ExportScope
+  scope: ExportScope,
+  virtualSource?: VirtualExportSource,
+  canStickyIndex?: boolean,
+  colTypes?: ('number' | 'text')[]
 ): Promise<Blob | null> {
   let offscreenHost: HTMLDivElement | null = null;
   let targetViewport = viewportEl;
@@ -823,12 +882,48 @@ export async function renderTableToPngBlob(
       }
 
       const clonedTable = table.cloneNode(true) as HTMLTableElement;
-      for (const tb of Array.from(clonedTable.tBodies)) {
-        for (const tr of Array.from(tb.rows)) {
-          tr.hidden = false;
-          for (const c of Array.from(tr.cells)) {
-            c.hidden = false;
-            c.removeAttribute('data-sat-col-hidden');
+      clonedTable.style.tableLayout = 'auto';
+      clonedTable.querySelector('colgroup')?.remove();
+
+      if (virtualSource) {
+        const tbody = clonedTable.tBodies[0] || clonedTable.createTBody();
+        tbody.innerHTML = '';
+        const rowsSlice = virtualSource.rows.slice(0, MAX_PNG_EXPORT_ROWS);
+        const frag = document.createDocumentFragment();
+        for (const vRow of rowsSlice) {
+          const tr = document.createElement('tr');
+          if (vRow.rowId) tr.id = vRow.rowId;
+          if (vRow.rowClass) tr.className = vRow.rowClass;
+          if (vRow.rowStyle) tr.setAttribute('style', vRow.rowStyle);
+          for (const colIdx of virtualSource.colOrder) {
+            const isIdx = Boolean(canStickyIndex && colIdx === 0);
+            const cellEl = document.createElement(isIdx ? 'th' : 'td');
+            const txt = vRow.cells[colIdx] ?? '';
+            cellEl.textContent = txt;
+            if (isIdx) cellEl.setAttribute('data-sat-index-cell', 'true');
+            cellEl.setAttribute('data-sat-col-type', colTypes?.[colIdx] || 'text');
+            cellEl.setAttribute('data-sat-type', vRow.isEllipsis ? 'null' : classifyCellValue(txt));
+            const cs = vRow.cellStyles?.[colIdx];
+            if (cs?.id) cellEl.id = cs.id;
+            if (cs?.className) cellEl.className = cs.className;
+            if (cs?.style) cellEl.setAttribute('style', cs.style);
+            tr.appendChild(cellEl);
+          }
+          frag.appendChild(tr);
+        }
+        tbody.appendChild(frag);
+      } else {
+        for (const tb of Array.from(clonedTable.tBodies)) {
+          for (const tr of Array.from(tb.rows)) {
+            if (tr.getAttribute('data-sat-spacer') === 'true') {
+              tr.remove();
+              continue;
+            }
+            tr.hidden = false;
+            for (const c of Array.from(tr.cells)) {
+              c.hidden = false;
+              c.removeAttribute('data-sat-col-hidden');
+            }
           }
         }
       }
@@ -844,7 +939,9 @@ export async function renderTableToPngBlob(
       innerHost.appendChild(clonedTable);
       offscreenHost.appendChild(innerHost);
       document.body.appendChild(offscreenHost);
-      ensureReadableStylerContrast(clonedTable);
+      if (preservedStylesHtml) {
+        ensureReadableStylerContrast(clonedTable);
+      }
 
       targetViewport = offscreenHost;
       targetScroll = offscreenHost;
@@ -889,7 +986,7 @@ export async function renderTableToPngBlob(
     // Layer 1: Non-sticky tbody cells
     for (const tb of Array.from(targetTable.tBodies)) {
       for (const tr of Array.from(tb.rows)) {
-        if (tr.hidden) continue;
+        if (tr.hidden || tr.getAttribute('data-sat-spacer') === 'true') continue;
         for (const cell of Array.from(tr.cells)) {
           if (cell.hidden || cell.getAttribute('data-sat-col-hidden') === 'true') continue;
           if (cell.getAttribute('data-sat-sticky-index') === 'true') continue;
@@ -905,7 +1002,7 @@ export async function renderTableToPngBlob(
     // Layer 2: Sticky index tbody cells
     for (const tb of Array.from(targetTable.tBodies)) {
       for (const tr of Array.from(tb.rows)) {
-        if (tr.hidden) continue;
+        if (tr.hidden || tr.getAttribute('data-sat-spacer') === 'true') continue;
         for (const cell of Array.from(tr.cells)) {
           if (cell.hidden || cell.getAttribute('data-sat-col-hidden') === 'true') continue;
           if (cell.getAttribute('data-sat-sticky-index') !== 'true') continue;
@@ -969,9 +1066,21 @@ export async function downloadTablePng(
   table: HTMLTableElement,
   preservedStylesHtml: string,
   scope: ExportScope,
-  filename = 'tabela.png'
+  filename = 'tabela.png',
+  virtualSource?: VirtualExportSource,
+  canStickyIndex?: boolean,
+  colTypes?: ('number' | 'text')[]
 ): Promise<boolean> {
-  const blob = await renderTableToPngBlob(viewportEl, scrollEl, table, preservedStylesHtml, scope);
+  const blob = await renderTableToPngBlob(
+    viewportEl,
+    scrollEl,
+    table,
+    preservedStylesHtml,
+    scope,
+    virtualSource,
+    canStickyIndex,
+    colTypes
+  );
   if (!blob) return false;
   triggerBlobDownload(blob, filename);
   return true;
@@ -982,13 +1091,25 @@ export async function copyTablePngToClipboard(
   scrollEl: HTMLElement,
   table: HTMLTableElement,
   preservedStylesHtml: string,
-  scope: ExportScope
+  scope: ExportScope,
+  virtualSource?: VirtualExportSource,
+  canStickyIndex?: boolean,
+  colTypes?: ('number' | 'text')[]
 ): Promise<boolean> {
   if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
     return false;
   }
   try {
-    const blob = await renderTableToPngBlob(viewportEl, scrollEl, table, preservedStylesHtml, scope);
+    const blob = await renderTableToPngBlob(
+      viewportEl,
+      scrollEl,
+      table,
+      preservedStylesHtml,
+      scope,
+      virtualSource,
+      canStickyIndex,
+      colTypes
+    );
     if (!blob) return false;
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
     return true;

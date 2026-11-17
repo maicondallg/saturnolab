@@ -46,6 +46,10 @@ export const SettingsModal: React.FC = React.memo(() => {
     setShowModifiedTime,
     confirmKernelRestart,
     setConfirmKernelRestart,
+    autoSave,
+    setAutoSave,
+    autoSaveDelay,
+    setAutoSaveDelay,
     tableOutputSettings,
     setTableOutputSettings,
   } = useSaturnoStore(useShallow((s) => ({
@@ -72,6 +76,10 @@ export const SettingsModal: React.FC = React.memo(() => {
     setShowModifiedTime: s.setShowModifiedTime,
     confirmKernelRestart: s.confirmKernelRestart,
     setConfirmKernelRestart: s.setConfirmKernelRestart,
+    autoSave: s.autoSave,
+    setAutoSave: s.setAutoSave,
+    autoSaveDelay: s.autoSaveDelay,
+    setAutoSaveDelay: s.setAutoSaveDelay,
     tableOutputSettings: s.tableOutputSettings,
     setTableOutputSettings: s.setTableOutputSettings,
   })));
@@ -180,6 +188,9 @@ export const SettingsModal: React.FC = React.memo(() => {
     {
       title: 'Execução, Abas e Interface',
       items: [
+        { desc: 'Autocompletar código, métodos e colunas (sem IA)', keys: 'Tab' },
+        { desc: 'Abrir documentação rápida do método/função (Docstring)', keys: 'Shift + Tab' },
+        { desc: 'Localizar e substituir dentro da célula', keys: 'Ctrl + F  /  Ctrl + H' },
         { desc: 'Mostrar / esconder barra lateral (Arquivos e Variáveis)', keys: 'Ctrl + B' },
         { desc: 'Fechar aba rapidamente', keys: 'Clique do Meio (Scroll)' },
         { desc: 'Fechar janela de Configurações', keys: 'Esc' },
@@ -545,6 +556,63 @@ export const SettingsModal: React.FC = React.memo(() => {
                   <p className="m-0 mb-4" style={{ color: 'var(--sat-text-muted)' }}>
                     Personalize como as células são executadas e como os arquivos são exibidos.
                   </p>
+                </div>
+
+                <div
+                  className="p-3.5 rounded-[4px] border space-y-2.5"
+                  style={{
+                    backgroundColor: 'var(--sat-bg-subtle)',
+                    borderColor: 'var(--sat-border)',
+                  }}
+                >
+                  <label className="flex items-start justify-between gap-4 cursor-pointer">
+                    <div>
+                      <div className="font-semibold text-xs">
+                        Salvamento automático (Auto-save + Recuperação de sessão)
+                      </div>
+                      <div
+                        className="text-[11.5px] mt-0.5"
+                        style={{ color: 'var(--sat-text-muted)' }}
+                      >
+                        Grava alterações automaticamente no disco após pausar a digitação ou concluir execuções. Rascunhos locais também ficam protegidos no navegador contra interrupções sem salvar.
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={autoSave}
+                      onChange={(e) => setAutoSave(e.target.checked)}
+                      className="w-4 h-4 mt-0.5 shrink-0 cursor-pointer"
+                    />
+                  </label>
+
+                  {autoSave && (
+                    <div
+                      className="pt-2 border-t flex items-center justify-between gap-3 text-[11.5px]"
+                      style={{ borderColor: 'var(--sat-border)' }}
+                    >
+                      <span style={{ color: 'var(--sat-text-secondary)' }}>
+                        Intervalo após inatividade
+                      </span>
+                      <select
+                        value={
+                          [1000, 2000, 5000, 10000].includes(autoSaveDelay)
+                            ? autoSaveDelay
+                            : 2000
+                        }
+                        onChange={(e) => setAutoSaveDelay(Number(e.target.value))}
+                        style={{
+                          background: 'var(--sat-bg-surface)',
+                          borderColor: 'var(--sat-border)',
+                        }}
+                        className="border rounded-[3px] px-2 py-1 text-xs"
+                      >
+                        <option value={1000}>1 segundo</option>
+                        <option value={2000}>2 segundos (padrão)</option>
+                        <option value={5000}>5 segundos</option>
+                        <option value={10000}>10 segundos</option>
+                      </select>
+                    </div>
+                  )}
                 </div>
 
                 <label

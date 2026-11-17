@@ -436,6 +436,121 @@ body,
   opacity: 0.65;
 }
 
+/* CodeMirror Search & Replace Panel inside cells */
+.saturno-cm-wrapper .cm-panels {
+  background-color: var(--sat-bg-subtle) !important;
+  color: var(--sat-text-primary) !important;
+  border-bottom: 1px solid var(--sat-border) !important;
+}
+
+.saturno-cm-wrapper .cm-search.cm-panel {
+  padding: 6px 10px !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  font-size: 12px !important;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.saturno-cm-wrapper .cm-search input.cm-textfield {
+  background-color: var(--sat-bg-canvas) !important;
+  color: var(--sat-text-primary) !important;
+  border: 1px solid var(--sat-border) !important;
+  border-radius: 3px !important;
+  padding: 3px 7px !important;
+  font-size: 12px !important;
+  outline: none !important;
+}
+
+.saturno-cm-wrapper .cm-search input.cm-textfield:focus {
+  border-color: var(--sat-accent) !important;
+}
+
+.saturno-cm-wrapper .cm-search button.cm-button {
+  background-image: none !important;
+  background-color: var(--sat-bg-surface) !important;
+  color: var(--sat-text-primary) !important;
+  border: 1px solid var(--sat-border) !important;
+  border-radius: 3px !important;
+  padding: 2px 8px !important;
+  font-size: 11.5px !important;
+  cursor: pointer;
+}
+
+.saturno-cm-wrapper .cm-search button.cm-button:hover {
+  background-color: var(--sat-bg-hover) !important;
+}
+
+.saturno-cm-wrapper .cm-search label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px !important;
+  color: var(--sat-text-secondary) !important;
+  cursor: pointer;
+}
+
+.saturno-cm-wrapper .cm-search button[name="close"] {
+  color: var(--sat-text-muted) !important;
+  padding: 2px 6px !important;
+  cursor: pointer;
+}
+
+.saturno-cm-wrapper .cm-searchMatch {
+  background-color: rgba(234, 179, 8, 0.28) !important;
+  outline: 1px solid rgba(234, 179, 8, 0.55);
+}
+
+.saturno-cm-wrapper .cm-searchMatch.cm-searchMatch-selected {
+  background-color: rgba(217, 119, 54, 0.45) !important;
+  outline: 1px solid var(--sat-accent);
+}
+
+/* CodeMirror Autocomplete Popup */
+.cm-tooltip.cm-tooltip-autocomplete {
+  background-color: var(--sat-bg-surface) !important;
+  border: 1px solid var(--sat-border-strong) !important;
+  border-radius: 5px !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35) !important;
+  overflow: hidden;
+  font-family: "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  font-size: 12.5px !important;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul {
+  max-height: 260px !important;
+  min-width: 260px !important;
+  max-width: 520px !important;
+  padding: 4px !important;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  padding: 4px 8px !important;
+  border-radius: 3px !important;
+  color: var(--sat-text-primary) !important;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background-color: var(--sat-accent-soft) !important;
+  color: var(--sat-text-primary) !important;
+}
+
+.cm-tooltip-autocomplete .cm-completionLabel {
+  font-weight: 500;
+}
+
+.cm-tooltip-autocomplete .cm-completionDetail {
+  margin-left: auto !important;
+  font-style: normal !important;
+  font-size: 11px !important;
+  color: var(--sat-text-muted) !important;
+}
+
 /* Pandas / HTML output tables — clean technical style */
 .jp-rendered-html {
   overflow-x: auto;
@@ -569,6 +684,16 @@ body,
   word-break: normal;
   overflow-wrap: break-word;
   max-width: var(--sat-table-max-col-w, 340px);
+}
+
+.sat-table-viewport table.sat-table td[data-sat-cell-expanded] {
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  overflow-wrap: anywhere !important;
+  max-width: 680px !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  background-color: var(--sat-accent-soft) !important;
 }
 
 .sat-table-viewport table.sat-table [data-sat-sticky-index="true"] {

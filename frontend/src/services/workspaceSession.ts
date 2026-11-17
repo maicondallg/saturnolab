@@ -1,4 +1,5 @@
 import { api } from './api';
+import { reconcileFileWithDraft, reconcileNotebookWithDraft } from './draftStorage';
 import { loadNotebookView, loadTextFileView } from './editorViews';
 import { EditorPane, WorkspaceTab } from '../types/notebook';
 
@@ -95,6 +96,7 @@ export async function restoreWorkspaceSession(root: string, collapseOutputs: boo
   if (!session) return null;
   const loaded = new Map<string, WorkspaceTab>();
   const failed: string[] = [];
+  const recovered: string[] = [];
   let next = 0;
   // Bound simultaneous requests when restoring a workspace with many tabs.
   await Promise.all(Array.from({ length: Math.min(4, session.tabs.length) }, async () => {
@@ -105,25 +107,68 @@ export async function restoreWorkspaceSession(root: string, collapseOutputs: boo
           loaded.set(ref.id, { kind: 'launcher', id: '__launcher__', name: 'Launcher' });
         } else if (ref.kind === 'file') {
           const [file] = await Promise.all([api.readFile(ref.id), loadTextFileView()]);
-          loaded.set(ref.id, { kind: 'file', id: ref.id, path: file.path, name: file.name,
-            content: file.content.replace(/\r\n/g, '\n'), dirty: false });
+          const diskContent = file.content.replace(/\r\n/g, '\n');
+          const reconciled = await reconcileFileWithDraft({
+            workspaceRoot: root,
+            path: file.path,
+            diskContent,
+            diskModified: file.modified,
+            truncated: file.truncated,
+          });
+          if (reconciled.restored) recovered.push(file.name);
+          loaded.set(ref.id, {
+            kind: 'file',
+            id: ref.id,
+            path: file.path,
+            name: file.name,
+            content: reconciled.content,
+            dirty: reconciled.dirty,
+            diskModified: file.modified,
+            truncated: file.truncated,
+          });
         } else {
           const [notebook] = await Promise.all([api.readNotebook(ref.id), loadNotebookView()]);
-          const cells = notebook.cells.map(c => ({ ...c, source: (c.source || '').replace(/\r\n/g, '\n'),
-            isRunning: false, outputCollapsed: collapseOutputs,
+          const diskCells = notebook.cells.map(c => ({
+            ...c,
+            source: (c.source || '').replace(/\r\n/g, '\n'),
+            isRunning: false,
+            outputCollapsed: collapseOutputs,
             markdownRendered: c.cell_type === 'markdown' && Boolean(c.source?.trim()),
           }));
-          loaded.set(ref.id, { kind: 'notebook', id: ref.id, path: notebook.path, name: notebook.name,
-            cells, metadata: notebook.metadata || {}, dirty: false,
-            kernelStatus: notebook.kernel_status || 'not_started', variables: notebook.variables || [],
-            activeCellId: cells.some(c => c.id === ref.activeCellId) ? ref.activeCellId! : cells[0]?.id || '',
+          const reconciled = await reconcileNotebookWithDraft({
+            workspaceRoot: root,
+            path: notebook.path,
+            diskCells,
+            diskMetadata: notebook.metadata || {},
+            diskModified: notebook.modified,
+            collapseOutputs,
+          });
+          if (reconciled.restored) recovered.push(notebook.name);
+          const cells = reconciled.cells;
+          const preferredCellId = reconciled.activeCellId || ref.activeCellId;
+          loaded.set(ref.id, {
+            kind: 'notebook',
+            id: ref.id,
+            path: notebook.path,
+            name: notebook.name,
+            cells,
+            metadata: reconciled.metadata,
+            dirty: reconciled.dirty,
+            diskModified: notebook.modified,
+            kernelStatus: notebook.kernel_status || 'not_started',
+            variables: notebook.variables || [],
+            activeCellId: cells.some(c => c.id === preferredCellId) ? preferredCellId! : cells[0]?.id || '',
           });
         }
       } catch { failed.push(ref.id); }
     }
   }));
-  return { ...sessionLayout(session, loaded),
-    statusMessage: failed.length ? `Não foi possível restaurar: ${failed.join(', ')}` : 'Pronto' };
+  const statusMessage = failed.length
+    ? `Não foi possível restaurar: ${failed.join(', ')}`
+    : recovered.length
+      ? `Rascunho recuperado: ${recovered.join(', ')}`
+      : 'Pronto';
+  return { ...sessionLayout(session, loaded), statusMessage };
 }
 
 function sessionLayout(session: Session, loaded: Map<string, WorkspaceTab>) {

@@ -6,7 +6,7 @@ import { useSaturnoStore } from '../store/useSaturnoStore';
 export const MenuBar: React.FC = React.memo(() => {
   const s = useSaturnoStore(useShallow(s => ({
     initialized: s.initialized, workspaceRoot: s.workspaceRoot, leftSidebar: s.leftSidebar, sidebarPosition: s.sidebarPosition,
-    notebookLayout: s.notebookLayout, showLineNumbers: s.showLineNumbers,
+    notebookLayout: s.notebookLayout, showLineNumbers: s.showLineNumbers, autoSave: s.autoSave,
     activeTab: s.tabs.find(t => t.id === s.activeTabId && (t.kind === 'launcher' || !t.loading)), activePaneId: s.activePaneId,
   })));
   const menu = useRef<HTMLDetailsElement>(null);
@@ -52,6 +52,7 @@ export const MenuBar: React.FC = React.memo(() => {
           {item('Abrir pasta…', () => actions.setShowFolderModal(true))}
           {separator}
           {item('Salvar', () => { void actions.saveActiveTab(); }, !s.activeTab || s.activeTab.kind === 'launcher', 'Ctrl+S')}
+          {item(s.autoSave ? '✓ Salvamento automático' : 'Salvamento automático', () => actions.setAutoSave(!s.autoSave))}
         </div></div>
         <div className="app-submenu"><button type="button" className="app-menu-heading">Editar</button><div className="app-submenu-items">
           {group('Células')}

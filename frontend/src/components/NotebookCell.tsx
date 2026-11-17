@@ -12,6 +12,7 @@ import {
   Eraser,
   Loader2,
   Play,
+  Search,
   Sparkles,
   Trash2,
 } from 'lucide-react';
@@ -72,6 +73,7 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
   }, [cell.id, selectCell, openInlineAI]);
 
   const [outputLimited, setOutputLimited] = useState(outputLimitedDefault);
+  const [searchTriggerSeq, setSearchTriggerSeq] = useState(0);
 
   useEffect(() => {
     if (cell.isRunning) setOutputLimited(outputLimitedDefault);
@@ -259,11 +261,13 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
               )}
 
               <CodeMirrorCellEditor
+                cellId={cell.id}
                 value={cell.source}
                 language={cell.cell_type === 'code' ? 'python' : 'markdown'}
                 theme={darkTheme ? 'dark' : 'light'}
                 showLineNumbers={showLineNumbers && cell.cell_type === 'code'}
                 autoFocus={isEditing && !aiState?.isOpen}
+                searchTriggerSeq={searchTriggerSeq}
                 placeholder={
                   cell.cell_type === 'code'
                     ? 'Código Python (Ctrl+I para IA)'
@@ -312,6 +316,9 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
                         outputs={cell.outputs}
                         onFixErrorWithAI={fixErrorWithAI}
                         outputLimited={outputLimited}
+                        cellId={cell.id}
+                        executionCount={cell.execution_count}
+                        cellSource={cell.source}
                       />
                     </div>
                   )}
@@ -339,6 +346,22 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
               className="cell-action-btn"
             >
               <Sparkles size={13} style={{ color: 'var(--sat-accent)' }} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (cell.cell_type === 'markdown' && cell.markdownRendered) {
+                  setMarkdownRendered(cell.id, false);
+                }
+                selectCell(cell.id, 'edit');
+                setSearchTriggerSeq((n) => n + 1);
+              }}
+              title="Localizar e substituir na célula (Ctrl+F / Ctrl+H)"
+              aria-label="Localizar e substituir na célula"
+              className="cell-action-btn"
+            >
+              <Search size={12.5} />
             </button>
 
             <button

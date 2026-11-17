@@ -24,11 +24,48 @@ export interface NotebookCellData {
   sectionCollapsed?: boolean;
 }
 
+export interface KernelVariableColumn {
+  name: string;
+  dtype: string;
+}
+
 export interface KernelVariable {
   name: string;
   type: string;
   shape: string;
   preview: string;
+  columns?: KernelVariableColumn[];
+}
+
+export interface KernelCompletionOption {
+  label: string;
+  type: string;
+  detail?: string;
+  boost?: number;
+}
+
+export interface KernelCompleteResponse {
+  from: number;
+  to: number;
+  options: KernelCompletionOption[];
+}
+
+export interface KernelInspectResponse {
+  found: boolean;
+  name?: string;
+  signature?: string;
+  type_name?: string;
+  docstring?: string;
+  file?: string;
+  string_form?: string;
+  raw_text?: string;
+}
+
+export interface KernelExpandOutputResponse {
+  found: boolean;
+  busy?: boolean;
+  'text/html'?: string | null;
+  'text/plain'?: string | null;
 }
 
 export interface FileEntry {
@@ -75,6 +112,8 @@ export interface SaturnoConfig {
   auto_scroll_on_run?: boolean;
   show_modified_time?: boolean;
   confirm_kernel_restart?: boolean;
+  auto_save?: boolean;
+  auto_save_delay?: number;
   editor_font_size?: number;
   table_output?: Partial<TableOutputSettings>;
   providers: Record<string, ProviderConfig>;
@@ -110,6 +149,7 @@ export interface OpenNotebookTab {
   cells: NotebookCellData[];
   metadata: Record<string, any>;
   dirty: boolean;
+  diskModified?: string;
   kernelStatus: 'not_started' | 'starting' | 'idle' | 'busy' | 'stopped';
   variables: KernelVariable[];
   activeCellId: string;
@@ -123,6 +163,8 @@ export interface OpenTextFileTab {
   name: string;
   content: string;
   dirty: boolean;
+  diskModified?: string;
+  truncated?: boolean;
 }
 
 export interface LauncherTab {
