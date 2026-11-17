@@ -95,7 +95,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path, content }),
     }),
-  createFile: (folder = '', name = 'script.py') =>
+    createFile: (folder = '', name = 'script.py') =>
     apiFetch<{ path: string; name: string; content: string; truncated: boolean }>(
       '/api/fs/file/create',
       {
@@ -103,6 +103,11 @@ export const api = {
         body: JSON.stringify({ folder, name }),
       }
     ),
+  copyEntries: (paths: string[], target_folder = '') =>
+    apiFetch<{ copied: string[] }>('/api/fs/copy', {
+      method: 'POST',
+      body: JSON.stringify({ paths, target_folder }),
+    }),
   moveEntries: (paths: string[], target_folder = '') =>
     apiFetch<{ moved: { old_path: string; new_path: string; name: string }[] }>(
       '/api/fs/move',
@@ -116,6 +121,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ paths }),
     }),
+  listKernels: () =>
+    apiFetch<{
+      kernels: {
+        notebook_path: string;
+        status: string;
+        python_executable: string;
+        variables_count: number;
+      }[];
+    }>('/api/kernels'),
   startKernel: (notebook_path: string) =>
     apiFetch<{ notebook_path: string; status: string; variables: any[] }>('/api/kernels/start', {
       method: 'POST',
@@ -145,6 +159,8 @@ class SaturnoWSClient {
   private listeners = new Set<WSListener>();
   private queue: string[] = [];
   private reconnectTimer: number | null = null;
+  private reconnectAttempts = 0;
+  private hasConnectedOnce = false;
 
   connect() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
@@ -152,16 +168,23 @@ class SaturnoWSClient {
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${protocol}//${window.location.host}/ws`;
-    this.ws = new WebSocket(url);
+    const socket = new WebSocket(url);
+    this.ws = socket;
 
-    this.ws.onopen = () => {
-      while (this.queue.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
+    socket.onopen = () => {
+      const isReconnect = this.hasConnectedOnce;
+      this.hasConnectedOnce = true;
+      this.reconnectAttempts = 0;
+      if (isReconnect) {
+        this.listeners.forEach((fn) => fn({ type: '__ws_reconnected__' }));
+      }
+      while (this.queue.length > 0 && socket.readyState === WebSocket.OPEN) {
         const item = this.queue.shift();
-        if (item) this.ws.send(item);
+        if (item) socket.send(item);
       }
     };
 
-    this.ws.onmessage = (evt) => {
+    socket.onmessage = (evt) => {
       try {
         const parsed = JSON.parse(evt.data);
         this.listeners.forEach((fn) => fn(parsed));
@@ -170,9 +193,16 @@ class SaturnoWSClient {
       }
     };
 
-    this.ws.onclose = () => {
+    socket.onclose = () => {
+      if (this.ws === socket) {
+        this.ws = null;
+      }
+      if (this.hasConnectedOnce) {
+        this.listeners.forEach((fn) => fn({ type: '__ws_disconnected__' }));
+      }
       if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = window.setTimeout(() => this.connect(), 1500);
+      const delay = Math.min(5000, 1000 * Math.pow(2, Math.min(3, this.reconnectAttempts++)));
+      this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
     };
   }
 

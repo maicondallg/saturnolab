@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import nbformat
+
+_VALID_CELL_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 IGNORED_NAMES = {
     ".git",
@@ -98,6 +102,47 @@ def _normalize_source(src: Any) -> str:
     return str(src or "")
 
 
+def _split_multiline(text: Any) -> list[str]:
+    if isinstance(text, list):
+        return [str(part) for part in text]
+    s = str(text or "")
+    return s.splitlines(keepends=True) if s else []
+
+
+def _sanitize_cell_id(raw_id: Any, used_ids: set[str]) -> str:
+    cand = str(raw_id or "").strip()
+    if not _VALID_CELL_ID_RE.match(cand) or cand in used_ids:
+        cand = uuid.uuid4().hex[:8]
+        while cand in used_ids:
+            cand = uuid.uuid4().hex[:8]
+    used_ids.add(cand)
+    return cand
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode: int | None = None
+    if os.name != "nt" and target.exists():
+        try:
+            existing_mode = target.stat().st_mode & 0o777
+        except OSError:
+            existing_mode = None
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        if existing_mode is not None:
+            try:
+                os.fchmod(fd, existing_mode)
+            except OSError:
+                pass
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+        os.replace(tmp_path, target)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _serialize_output(out: Any) -> dict[str, Any]:
     out_type = out.get("output_type", "stream")
     if out_type == "stream":
@@ -129,33 +174,55 @@ def _serialize_output(out: Any) -> dict[str, Any]:
     return {"output_type": out_type, "text": str(out)}
 
 
-def _deserialize_output_to_nbformat(out: dict[str, Any]) -> Any:
+def _deserialize_output_to_dict(out: dict[str, Any]) -> dict[str, Any]:
     out_type = out.get("output_type", "stream")
     if out_type == "stream":
-        return nbformat.v4.new_output(
-            output_type="stream",
-            name=out.get("name", "stdout"),
-            text=out.get("text", ""),
-        )
-    elif out_type == "execute_result":
-        return nbformat.v4.new_output(
-            output_type="execute_result",
-            data=out.get("data", {}),
-            execution_count=out.get("execution_count"),
-        )
-    elif out_type == "display_data":
-        return nbformat.v4.new_output(
-            output_type="display_data",
-            data=out.get("data", {}),
-        )
-    elif out_type == "error":
-        return nbformat.v4.new_output(
-            output_type="error",
-            ename=out.get("ename", "Error"),
-            evalue=out.get("evalue", ""),
-            traceback=out.get("traceback", []),
-        )
-    return nbformat.v4.new_output(output_type="stream", name="stdout", text=str(out))
+        return {
+            "output_type": "stream",
+            "name": str(out.get("name") or "stdout"),
+            "text": _split_multiline(out.get("text", "")),
+        }
+    if out_type == "execute_result":
+        raw_data = out.get("data") if isinstance(out.get("data"), dict) else {}
+        clean_data: dict[str, Any] = {}
+        for mime, val in raw_data.items():
+            if isinstance(val, (dict, list)) and str(mime).endswith("+json"):
+                clean_data[mime] = val
+            else:
+                clean_data[mime] = _split_multiline(val)
+        exec_count = out.get("execution_count")
+        return {
+            "output_type": "execute_result",
+            "data": clean_data,
+            "metadata": out.get("metadata") if isinstance(out.get("metadata"), dict) else {},
+            "execution_count": int(exec_count) if isinstance(exec_count, int) else None,
+        }
+    if out_type == "display_data":
+        raw_data = out.get("data") if isinstance(out.get("data"), dict) else {}
+        clean_data = {}
+        for mime, val in raw_data.items():
+            if isinstance(val, (dict, list)) and str(mime).endswith("+json"):
+                clean_data[mime] = val
+            else:
+                clean_data[mime] = _split_multiline(val)
+        return {
+            "output_type": "display_data",
+            "data": clean_data,
+            "metadata": out.get("metadata") if isinstance(out.get("metadata"), dict) else {},
+        }
+    if out_type == "error":
+        tb = out.get("traceback")
+        return {
+            "output_type": "error",
+            "ename": str(out.get("ename") or "Error"),
+            "evalue": str(out.get("evalue") or ""),
+            "traceback": [str(line) for line in tb] if isinstance(tb, list) else [],
+        }
+    return {
+        "output_type": "stream",
+        "name": "stdout",
+        "text": _split_multiline(str(out)),
+    }
 
 
 def read_notebook(workspace_root: Path, rel_path: str) -> dict[str, Any]:
@@ -224,10 +291,8 @@ def save_notebook(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target = safe_resolve(workspace_root, rel_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
 
-    nb = nbformat.v4.new_notebook()
-    default_meta = {
+    default_meta: dict[str, Any] = {
         "kernelspec": {
             "display_name": "Python 3 (ipykernel)",
             "language": "python",
@@ -241,34 +306,50 @@ def save_notebook(
     }
     if metadata:
         default_meta.update(metadata)
-    nb.metadata = default_meta
 
-    nb_cells = []
+    used_ids: set[str] = set()
+    nb_cells: list[dict[str, Any]] = []
     for c in cells:
         ctype = c.get("cell_type", "code")
-        src = c.get("source", "")
-        cid = c.get("id") or uuid.uuid4().hex[:8]
-        cmeta = c.get("metadata", {})
+        cid = _sanitize_cell_id(c.get("id"), used_ids)
+        cmeta = dict(c.get("metadata")) if isinstance(c.get("metadata"), dict) else {}
+        src_lines = _split_multiline(c.get("source", ""))
         if ctype == "markdown":
-            cell_obj = nbformat.v4.new_markdown_cell(source=src, metadata=cmeta)
-            cell_obj["id"] = cid
+            nb_cells.append(
+                {
+                    "cell_type": "markdown",
+                    "id": cid,
+                    "metadata": cmeta,
+                    "source": src_lines,
+                }
+            )
         else:
+            raw_exec = c.get("execution_count")
+            exec_count = int(raw_exec) if isinstance(raw_exec, int) else None
             outputs = [
-                _deserialize_output_to_nbformat(o)
+                _deserialize_output_to_dict(o)
                 for o in c.get("outputs", [])
                 if isinstance(o, dict)
             ]
-            cell_obj = nbformat.v4.new_code_cell(
-                source=src,
-                execution_count=c.get("execution_count"),
-                outputs=outputs,
-                metadata=cmeta,
+            nb_cells.append(
+                {
+                    "cell_type": "code",
+                    "execution_count": exec_count,
+                    "id": cid,
+                    "metadata": cmeta,
+                    "outputs": outputs,
+                    "source": src_lines,
+                }
             )
-            cell_obj["id"] = cid
-        nb_cells.append(cell_obj)
 
-    nb.cells = nb_cells
-    nbformat.write(nb, str(target))
+    nb_payload = {
+        "cells": nb_cells,
+        "metadata": default_meta,
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    serialized = json.dumps(nb_payload, indent=1, ensure_ascii=False) + "\n"
+    _atomic_write_text(target, serialized)
     return {
         "saved": True,
         "path": str(target.relative_to(workspace_root.resolve())).replace("\\", "/"),
@@ -313,8 +394,15 @@ def create_notebook(
 
 
 def create_folder(workspace_root: Path, folder_rel_path: str, name: str) -> dict[str, Any]:
-    new_dir = safe_resolve(workspace_root, str(Path(folder_rel_path) / name))
-    new_dir.mkdir(parents=True, exist_ok=True)
+    clean_name = name.strip()
+    if not clean_name or clean_name in (".", "..") or "/" in clean_name or "\\" in clean_name:
+        raise ValueError("Use apenas o nome da nova pasta.")
+    parent = safe_resolve(workspace_root, folder_rel_path)
+    parent.mkdir(parents=True, exist_ok=True)
+    new_dir = safe_resolve(workspace_root, str(Path(folder_rel_path) / clean_name))
+    if new_dir.exists():
+        raise FileExistsError(f"Já existe '{clean_name}' nesta pasta.")
+    new_dir.mkdir(parents=True, exist_ok=False)
     return {
         "created": True,
         "path": str(new_dir.relative_to(workspace_root.resolve())).replace("\\", "/"),
@@ -374,8 +462,7 @@ def read_text_file(workspace_root: Path, rel_path: str, max_bytes: int = 512_000
 
 def write_text_file(workspace_root: Path, rel_path: str, content: str) -> dict[str, Any]:
     target = safe_resolve(workspace_root, rel_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    _atomic_write_text(target, content)
     return {
         "saved": True,
         "path": str(target.relative_to(workspace_root.resolve())).replace("\\", "/"),
@@ -488,11 +575,14 @@ def copy_entries(workspace_root: Path, paths: list[str], target_folder: str = ""
         target = destination / source.name
         counter = 1
         while target.exists():
-            target = destination / f"{source.stem}_copy{counter}{source.suffix}"
+            if source.is_dir():
+                target = destination / f"{source.name}_copy{counter}"
+            else:
+                target = destination / f"{source.stem}_copy{counter}{source.suffix}"
             counter += 1
         if source.is_dir():
             shutil.copytree(source, target)
         else:
             shutil.copy2(source, target)
-        copied.append(str(target.relative_to(root)))
+        copied.append(str(target.relative_to(root)).replace("\\", "/"))
     return {"copied": copied}

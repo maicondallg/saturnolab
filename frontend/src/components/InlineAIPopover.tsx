@@ -30,7 +30,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
     cancelInlineAI,
     acceptInlineAI,
     closeInlineAI,
-    setShowAIModal,
+    openSettings,
   } = useSaturnoStore(useShallow((s) => ({
     setInlineAIPrompt: s.setInlineAIPrompt,
     setInlineAIApplyMode: s.setInlineAIApplyMode,
@@ -38,7 +38,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
     cancelInlineAI: s.cancelInlineAI,
     acceptInlineAI: s.acceptInlineAI,
     closeInlineAI: s.closeInlineAI,
-    setShowAIModal: s.setShowAIModal,
+    openSettings: s.openSettings,
   })));
 
   const rootRef = useRef<HTMLDivElement>(null);
@@ -380,7 +380,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
           <span className="leading-relaxed">{aiState.errorMessage}</span>
           <button
             type="button"
-            onClick={() => setShowAIModal(true)}
+            onClick={() => openSettings('ai')}
             className="h-6.5 px-2.5 rounded-[3px] border text-xs font-medium shrink-0 cursor-pointer"
           >
             Configurar Modelo

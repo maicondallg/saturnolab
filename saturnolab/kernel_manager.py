@@ -4,6 +4,7 @@ import ast
 import asyncio
 import json
 import os
+import queue
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,15 @@ except Exception:
 
 def __saturno_inspect_ns__():
     import json as _json
+    import reprlib as _reprlib
     import types as _types
+    _rlib = _reprlib.Repr()
+    _rlib.maxlist = 6
+    _rlib.maxtuple = 6
+    _rlib.maxset = 6
+    _rlib.maxdict = 5
+    _rlib.maxstring = 80
+    _rlib.maxother = 80
     _ip = get_ipython()
     _ns = _ip.user_ns if _ip else globals()
     _skip = {{'In', 'Out', 'get_ipython', 'exit', 'quit', 'open'}}
@@ -35,23 +44,45 @@ def __saturno_inspect_ns__():
         _preview = ""
         try:
             if _tname == "DataFrame" and hasattr(_v, "columns") and hasattr(_v, "dtypes"):
-                _shape = str(tuple(_v.shape))
-                _cols = [f"{{c}} ({{_v.dtypes[c]}})" for c in list(_v.columns)[:25]]
+                if hasattr(_v, "shape"):
+                    _shape = str(tuple(_v.shape))
+                _col_names = list(_v.columns)
+                _dtypes_raw = _v.dtypes
+                if isinstance(_dtypes_raw, (list, tuple)):
+                    _pairs = list(zip(_col_names[:25], _dtypes_raw[:25]))
+                else:
+                    _pairs = list(zip(_col_names[:25], list(_dtypes_raw)[:25]))
+                _cols = [f"{{c}} ({{dt}})" for c, dt in _pairs]
                 _preview = "cols: [" + ", ".join(_cols) + (
-                    f", ...+{{len(_v.columns)-25}}" if len(_v.columns) > 25 else ""
+                    f", ...+{{len(_col_names)-25}}" if len(_col_names) > 25 else ""
+                ) + "]"
+            elif _tname == "LazyFrame" and hasattr(_v, "collect_schema"):
+                _schema = _v.collect_schema()
+                _col_names = list(_schema.names())
+                _shape = f"cols={{len(_col_names)}}"
+                _cols = [f"{{c}} ({{_schema[c]}})" for c in _col_names[:25]]
+                _preview = "cols: [" + ", ".join(_cols) + (
+                    f", ...+{{len(_col_names)-25}}" if len(_col_names) > 25 else ""
                 ) + "]"
             elif _tname == "Series" and hasattr(_v, "dtype"):
-                _shape = str(tuple(_v.shape))
+                if hasattr(_v, "shape"):
+                    _shape = str(tuple(_v.shape))
+                elif hasattr(_v, "__len__"):
+                    _shape = f"({{len(_v)}},)"
                 _preview = f"dtype={{_v.dtype}}, name={{getattr(_v, 'name', None)}}"
             elif hasattr(_v, "shape") and hasattr(_v, "dtype"):
                 _shape = str(getattr(_v, "shape", ""))
                 _preview = f"dtype={{getattr(_v, 'dtype', '')}}"
+            elif isinstance(_v, (str, bytes, bytearray)):
+                _shape = f"len={{len(_v)}}"
+                _r = _rlib.repr(_v)
+                _preview = _r[:90] + ("..." if len(_r) > 90 else "")
             elif isinstance(_v, (list, tuple, set, dict)):
                 _shape = f"len={{len(_v)}}"
-                _r = repr(_v)
+                _r = _rlib.repr(_v)
                 _preview = _r[:90] + ("..." if len(_r) > 90 else "")
             else:
-                _r = repr(_v)
+                _r = _rlib.repr(_v)
                 _preview = _r[:90] + ("..." if len(_r) > 90 else "")
         except Exception:
             _preview = "<unavailable>"
@@ -162,6 +193,8 @@ class NotebookKernelSession:
         self.status: str = "starting"
         self.execution_lock = asyncio.Lock()
         self.variables_cache: list[dict[str, Any]] = []
+        self._abort_epoch: int = 0
+        self._failed_batches: set[str] = set()
 
     async def start(self) -> None:
         self.cwd.mkdir(parents=True, exist_ok=True)
@@ -192,13 +225,40 @@ class NotebookKernelSession:
         except Exception:
             pass
 
+    def _mark_batch_failed(self, batch_id: str | None) -> None:
+        if not batch_id:
+            return
+        if len(self._failed_batches) >= 64:
+            self._failed_batches.clear()
+        self._failed_batches.add(batch_id)
+
     async def execute_cell(
         self,
         cell_id: str,
         code: str,
         on_event: EventCallback,
+        *,
+        batch_id: str | None = None,
+        stop_on_error: bool = False,
     ) -> dict[str, Any]:
+        queued_epoch = self._abort_epoch
         async with self.execution_lock:
+            if queued_epoch != self._abort_epoch or (batch_id and batch_id in self._failed_batches):
+                await on_event(
+                    {
+                        "type": "cell_execution_done",
+                        "notebook_path": self.notebook_path,
+                        "cell_id": cell_id,
+                        "execution_count": None,
+                        "variables": self.variables_cache,
+                    }
+                )
+                return {
+                    "execution_count": None,
+                    "outputs": [],
+                    "variables": self.variables_cache,
+                }
+
             if not self.kc or not await self.km.is_alive():
                 await self.start()
 
@@ -228,10 +288,36 @@ class NotebookKernelSession:
 
             execution_count: int | None = None
             outputs: list[dict[str, Any]] = []
+            had_error = False
 
             try:
                 while True:
-                    msg = await self.kc.get_iopub_msg(timeout=300)
+                    try:
+                        msg = await self.kc.get_iopub_msg(timeout=2.0)
+                    except (asyncio.TimeoutError, TimeoutError, queue.Empty):
+                        if not await self.km.is_alive():
+                            had_error = True
+                            out_item = {
+                                "output_type": "error",
+                                "ename": "KernelDied",
+                                "evalue": "O processo do kernel foi encerrado inesperadamente (possível falta de memória ou falha nativa).",
+                                "traceback": [
+                                    "KernelDied: O processo do kernel foi encerrado inesperadamente."
+                                ],
+                            }
+                            outputs.append(out_item)
+                            self.variables_cache = []
+                            await on_event(
+                                {
+                                    "type": "cell_output",
+                                    "notebook_path": self.notebook_path,
+                                    "cell_id": cell_id,
+                                    "output": out_item,
+                                }
+                            )
+                            break
+                        continue
+
                     if msg.get("parent_header", {}).get("msg_id") != msg_id:
                         continue
 
@@ -290,6 +376,7 @@ class NotebookKernelSession:
                             }
                         )
                     elif mtype == "error":
+                        had_error = True
                         out_item = {
                             "output_type": "error",
                             "ename": content.get("ename", "Error"),
@@ -313,6 +400,8 @@ class NotebookKernelSession:
                         reply = await self.kc.get_shell_msg(timeout=2)
                         if reply.get("parent_header", {}).get("msg_id") == msg_id:
                             rcontent = reply.get("content", {})
+                            if rcontent.get("status") == "error":
+                                had_error = True
                             if execution_count is None and rcontent.get("execution_count") is not None:
                                 execution_count = rcontent.get("execution_count")
                             uexpr = rcontent.get("user_expressions", {}).get("__vars__", {})
@@ -324,6 +413,9 @@ class NotebookKernelSession:
                             break
                 except Exception:
                     pass
+
+                if had_error and stop_on_error:
+                    self._mark_batch_failed(batch_id)
 
             finally:
                 self.status = "idle"
@@ -351,10 +443,13 @@ class NotebookKernelSession:
             }
 
     async def interrupt(self) -> None:
+        self._abort_epoch += 1
         if await self.km.is_alive():
             await self.km.interrupt_kernel()
 
     async def restart(self) -> None:
+        self._abort_epoch += 1
+        self._failed_batches.clear()
         if await self.km.is_alive():
             await self.km.restart_kernel(now=True)
             if self.kc:
@@ -366,6 +461,7 @@ class NotebookKernelSession:
         self.status = "idle"
 
     async def shutdown(self) -> None:
+        self._abort_epoch += 1
         try:
             if self.kc:
                 self.kc.stop_channels()
@@ -423,11 +519,16 @@ class SaturnoKernelRegistry:
         ]
 
     async def shutdown_notebook(self, workspace_root: Path, notebook_rel_path: str) -> None:
-        key = str((workspace_root / notebook_rel_path).resolve())
+        key_path = (workspace_root / notebook_rel_path).resolve()
         # A filesystem operation may target a folder containing open notebooks.
-        keys = [active for active in self._sessions if active == key or active.startswith(key + "/")]
+        keys = [
+            active
+            for active in self._sessions
+            if Path(active).is_relative_to(key_path)
+        ]
         for active in keys:
             session = self._sessions.pop(active, None)
+            self._locks.pop(active, None)
             if session:
                 await session.shutdown()
 
@@ -435,6 +536,7 @@ class SaturnoKernelRegistry:
         for s in list(self._sessions.values()):
             await s.shutdown()
         self._sessions.clear()
+        self._locks.clear()
 
 
 kernel_registry = SaturnoKernelRegistry()

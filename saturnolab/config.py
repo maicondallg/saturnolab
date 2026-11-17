@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,8 @@ from pydantic import BaseModel, Field
 CONFIG_DIR = Path.home() / ".saturnolab"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LEGACY_CONFIG_FILE = Path.home() / ".saturno" / "config.json"
+
+VALID_PROVIDERS = {"gemini", "codex", "openai_compatible", "anthropic"}
 
 VALID_THEMES = {
     "jupyter_dark",
@@ -130,10 +133,21 @@ class ConfigManager:
 
     def save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(
-            json.dumps(self._config.model_dump(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        payload = json.dumps(self._config.model_dump(), indent=2, ensure_ascii=False)
+        fd, tmp_name = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=str(CONFIG_DIR))
+        tmp_path = Path(tmp_name)
+        try:
+            if os.name != "nt":
+                try:
+                    os.fchmod(fd, 0o600)
+                except OSError:
+                    pass
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            os.replace(tmp_path, CONFIG_FILE)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
     @property
     def config(self) -> SaturnoConfig:
@@ -152,7 +166,7 @@ class ConfigManager:
         return target
 
     def update_settings(self, patch: dict[str, Any]) -> SaturnoConfig:
-        if "active_provider" in patch and patch["active_provider"]:
+        if "active_provider" in patch and patch["active_provider"] in VALID_PROVIDERS:
             self._config.active_provider = str(patch["active_provider"])
         if "theme" in patch and patch["theme"] in VALID_THEMES:
             self._config.theme = str(patch["theme"])

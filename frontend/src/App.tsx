@@ -98,15 +98,19 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (
-        (e.ctrlKey || e.metaKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        e.key.toLowerCase() === 'b'
-      ) {
+      if (e.defaultPrevented) return;
+      const lower = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && lower === 'b') {
         e.preventDefault();
         const curr = useSaturnoStore.getState().leftSidebar;
         useSaturnoStore.getState().setLeftSidebar(curr ? null : 'files');
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && lower === 's') {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest('[data-modal-root="true"]')) return;
+        e.preventDefault();
+        void useSaturnoStore.getState().saveActiveTab();
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -233,9 +237,9 @@ export const App: React.FC = () => {
                     const hasTab = e.dataTransfer.types.includes(
                       'application/x-saturno-tab'
                     );
-                    const hasEntry = e.dataTransfer.types.includes(
-                      'application/x-saturno-entry'
-                    );
+                    const hasEntry =
+                      e.dataTransfer.types.includes('application/x-saturno-entry') ||
+                      e.dataTransfer.types.includes('application/x-saturno-entries');
                     if (!hasTab && !hasEntry) return;
                     e.preventDefault();
                     const rect = e.currentTarget.getBoundingClientRect();

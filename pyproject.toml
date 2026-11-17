@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "saturnolab"
-version = "0.1.6"
+version = "0.1.7"
 description = "Lightweight JupyterLab-compatible Python notebook environment with native inline AI connected to live kernel memory."
 readme = "README.md"
 license = "MIT"

@@ -12,6 +12,32 @@ import httpx
 
 from .config import config_manager
 
+_http_client: httpx.AsyncClient | None = None
+_http_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client, _http_client_loop
+    loop = asyncio.get_running_loop()
+    if _http_client is None or _http_client.is_closed or _http_client_loop is not loop:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=15.0),
+            limits=httpx.Limits(max_keepalive_connections=8, max_connections=20),
+        )
+        _http_client_loop = loop
+    return _http_client
+
+
+async def close_http_client() -> None:
+    global _http_client, _http_client_loop
+    if _http_client is not None and not _http_client.is_closed:
+        try:
+            await _http_client.aclose()
+        except Exception:
+            pass
+    _http_client = None
+    _http_client_loop = None
+
 
 def strip_markdown_fences(code: str, cell_type: str = "code") -> str:
     if cell_type == "markdown":
@@ -117,7 +143,11 @@ async def _stream_gemini(
         model_id = model_id[len("models/") :]
 
     root = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-    url = f"{root}/models/{model_id}:streamGenerateContent?alt=sse&key={api_key}"
+    url = f"{root}/models/{model_id}:streamGenerateContent?alt=sse"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    }
 
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -125,28 +155,28 @@ async def _stream_gemini(
         "generationConfig": {"temperature": 0.2},
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream("POST", url, json=payload) as resp:
-            if resp.status_code >= 400:
-                body = await resp.aread()
-                raise RuntimeError(
-                    f"Erro Gemini ({resp.status_code}): {body.decode('utf-8', errors='replace')[:400]}"
-                )
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if not data_str or data_str == "[DONE]":
-                    continue
-                try:
-                    chunk = json.loads(data_str)
-                    for cand in chunk.get("candidates", []):
-                        for part in cand.get("content", {}).get("parts", []):
-                            txt = part.get("text", "")
-                            if txt:
-                                yield txt
-                except json.JSONDecodeError:
-                    continue
+    client = _get_http_client()
+    async with client.stream("POST", url, headers=headers, json=payload) as resp:
+        if resp.status_code >= 400:
+            body = await resp.aread()
+            raise RuntimeError(
+                f"Erro Gemini ({resp.status_code}): {body.decode('utf-8', errors='replace')[:400]}"
+            )
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data_str)
+                for cand in chunk.get("candidates", []):
+                    for part in cand.get("content", {}).get("parts", []):
+                        txt = part.get("text", "")
+                        if txt:
+                            yield txt
+            except json.JSONDecodeError:
+                continue
 
 
 async def _stream_codex(
@@ -262,6 +292,7 @@ async def _stream_codex(
         if proc.returncode is None:
             try:
                 proc.kill()
+                await proc.wait()
             except Exception:
                 pass
 
@@ -289,28 +320,28 @@ async def _stream_openai_compatible(
         "stream": True,
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
-            if resp.status_code >= 400:
-                body = await resp.aread()
-                raise RuntimeError(
-                    f"Erro OpenAI-Compatible ({resp.status_code}): {body.decode('utf-8', errors='replace')[:400]}"
-                )
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if not data_str or data_str == "[DONE]":
-                    continue
-                try:
-                    chunk = json.loads(data_str)
-                    choices = chunk.get("choices", [])
-                    if choices:
-                        delta = choices[0].get("delta", {}).get("content", "")
-                        if delta:
-                            yield delta
-                except json.JSONDecodeError:
-                    continue
+    client = _get_http_client()
+    async with client.stream("POST", url, headers=headers, json=payload) as resp:
+        if resp.status_code >= 400:
+            body = await resp.aread()
+            raise RuntimeError(
+                f"Erro OpenAI-Compatible ({resp.status_code}): {body.decode('utf-8', errors='replace')[:400]}"
+            )
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data_str)
+                choices = chunk.get("choices", [])
+                if choices:
+                    delta = choices[0].get("delta", {}).get("content", "")
+                    if delta:
+                        yield delta
+            except json.JSONDecodeError:
+                continue
 
 
 async def _stream_anthropic(
@@ -337,27 +368,27 @@ async def _stream_anthropic(
         "stream": True,
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
-            if resp.status_code >= 400:
-                body = await resp.aread()
-                raise RuntimeError(
-                    f"Erro Anthropic ({resp.status_code}): {body.decode('utf-8', errors='replace')[:400]}"
-                )
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if not data_str:
-                    continue
-                try:
-                    evt = json.loads(data_str)
-                    if evt.get("type") == "content_block_delta":
-                        txt = evt.get("delta", {}).get("text", "")
-                        if txt:
-                            yield txt
-                except json.JSONDecodeError:
-                    continue
+    client = _get_http_client()
+    async with client.stream("POST", url, headers=headers, json=payload) as resp:
+        if resp.status_code >= 400:
+            body = await resp.aread()
+            raise RuntimeError(
+                f"Erro Anthropic ({resp.status_code}): {body.decode('utf-8', errors='replace')[:400]}"
+            )
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if not data_str:
+                continue
+            try:
+                evt = json.loads(data_str)
+                if evt.get("type") == "content_block_delta":
+                    txt = evt.get("delta", {}).get("text", "")
+                    if txt:
+                        yield txt
+            except json.JSONDecodeError:
+                continue
 
 
 async def stream_inline_generation(

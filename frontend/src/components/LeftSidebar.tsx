@@ -4,7 +4,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { ChevronDown, ChevronRight, ChevronsDownUp, Folder, ListTree, Database, PanelLeftClose, Plus, RefreshCw, X } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 import { loadNotebookView, loadTextFileView } from '../services/editorViews';
-import { apiFetch } from '../services/api';
+import { api } from '../services/api';
 import { FileEntry } from '../types/notebook';
 import { flattenVisibleTree, formatModifiedShort, formatModifiedTooltip } from '../utils/fileUtils';
 import { notebookOutline } from '../utils/notebookOutline';
@@ -58,7 +58,7 @@ export const LeftSidebar: React.FC = React.memo(() => {
     try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   };
   const copyTo = async (selected: string[], folder: string) => {
-    await apiFetch('/api/fs/copy', { method: 'POST', body: JSON.stringify({ paths: selected, target_folder: folder }) });
+    await api.copyEntries(selected, folder);
     await a.refreshFiles();
     useSaturnoStore.setState({ statusMessage: `${selected.length} item(ns) copiado(s)` });
   };
@@ -113,7 +113,7 @@ export const LeftSidebar: React.FC = React.memo(() => {
           const clean = name.trim(); if (!clean) return;
           if (naming.kind === 'rename' && naming.entry) await a.renameEntry(naming.entry.path, clean);
           else if (naming.kind === 'folder') await a.createNewFolder(clean, naming.folder);
-          else if (naming.kind === 'notebook') { const result = await apiFetch<{path: string}>('/api/fs/notebook/create', { method: 'POST', body: JSON.stringify({folder: naming.folder, name: clean}) }); if (naming.folder) await a.setFolderExpanded(naming.folder, true); await a.refreshFiles(); await a.openNotebookByPath(result.path); }
+          else if (naming.kind === 'notebook') await a.createNewNotebook(naming.folder, clean);
           else await a.createNewFile(naming.folder, clean);
           setNaming(null);
         }); }}>
@@ -178,7 +178,7 @@ export const LeftSidebar: React.FC = React.memo(() => {
               e.dataTransfer.effectAllowed='copyMove';
             }}
             onDragOver={e => { if(entry.type==='directory' && e.dataTransfer.types.includes('application/x-saturno-paths')) { e.preventDefault(); e.stopPropagation(); setDropFolder(entry.path); e.dataTransfer.dropEffect='move'; } }}
-            onDragLeave={() => setDropFolder(null)} onDragEnd={() => setDropFolder(null)}
+            onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropFolder(null); }} onDragEnd={() => setDropFolder(null)}
             onDrop={e => { if(entry.type==='directory') drop(e,entry.path); }}>
             {entry.type==='directory' && (s.expanded[entry.path] ? <ChevronDown size={13}/> : <ChevronRight size={13}/>)}
             <FileTypeIcon name={entry.name} type={entry.type} isOpenFolder={!!s.expanded[entry.path]} size={16}/>

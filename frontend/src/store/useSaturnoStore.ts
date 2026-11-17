@@ -24,8 +24,64 @@ import {
 } from '../utils/tableConfig';
 import { hiddenSectionCells } from '../utils/notebookOutline';
 
+const MAX_STREAM_CHARS = 512_000;
+const TRUNCATION_NOTICE = '\n… [saída truncada após 512 KB]';
+const MAX_DELETED_CELL_STACK = 30;
+
 function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
+}
+
+function isPathOrDescendant(path: string, target: string): boolean {
+  return Boolean(target) && (path === target || path.startsWith(`${target}/`));
+}
+
+function remapPathPrefix(path: string, oldPrefix: string, newPrefix: string): string | null {
+  if (path === oldPrefix) return newPrefix;
+  if (path.startsWith(`${oldPrefix}/`)) return `${newPrefix}${path.slice(oldPrefix.length)}`;
+  return null;
+}
+
+export function mergeStreamText(existing: string, incoming: string): string {
+  if (!incoming) return existing;
+  if (existing.endsWith(TRUNCATION_NOTICE)) return existing;
+
+  let merged: string;
+  if (!incoming.includes('\r')) {
+    merged = existing + incoming;
+  } else {
+    const normalized = incoming.replace(/\r\n/g, '\n');
+    if (!normalized.includes('\r')) {
+      merged = existing + normalized;
+    } else {
+      let buf = existing;
+      const segments = normalized.split('\r');
+      buf += segments[0];
+      for (let i = 1; i < segments.length; i++) {
+        const seg = segments[i];
+        if (seg.startsWith('\n')) {
+          buf += seg;
+        } else if (seg.length > 0) {
+          const lastNl = buf.lastIndexOf('\n');
+          const lineStart = lastNl + 1;
+          const nlInSeg = seg.indexOf('\n');
+          if (nlInSeg === -1) {
+            const currentLineLen = buf.length - lineStart;
+            const tail = seg.length < currentLineLen ? buf.slice(lineStart + seg.length) : '';
+            buf = buf.slice(0, lineStart) + seg + tail;
+          } else {
+            buf = buf.slice(0, lineStart) + seg;
+          }
+        }
+      }
+      merged = buf;
+    }
+  }
+
+  if (merged.length > MAX_STREAM_CHARS) {
+    return merged.slice(0, MAX_STREAM_CHARS) + TRUNCATION_NOTICE;
+  }
+  return merged;
 }
 
 export type LeftSidebarTab = 'files' | 'variables' | 'outline' | null;
@@ -69,8 +125,6 @@ interface SaturnoStore {
 
   // Modals
   showFolderModal: boolean;
-  showAIModal: boolean;
-  showShortcutsModal: boolean;
   showSettingsModal: boolean;
   settingsSection: SettingsSection;
   statusMessage: string;
@@ -111,8 +165,6 @@ interface SaturnoStore {
   setConfirmKernelRestart: (v: boolean) => void;
   setTableOutputSettings: (patch: Partial<TableOutputSettings>) => void;
   setShowFolderModal: (v: boolean) => void;
-  setShowAIModal: (v: boolean) => void;
-  setShowShortcutsModal: (v: boolean) => void;
   openSettings: (section?: SettingsSection) => void;
   closeSettings: () => void;
   toggleLineNumbers: () => void;
@@ -133,7 +185,7 @@ interface SaturnoStore {
   switchWorkspace: (newPath: string) => Promise<void>;
   openEntry: (entry: FileEntry, options?: OpenOptions) => Promise<void>;
   openNotebookByPath: (relPath: string, options?: OpenOptions) => Promise<void>;
-  createNewNotebook: (folder?: string) => Promise<void>;
+  createNewNotebook: (folder?: string, name?: string) => Promise<void>;
   createNewFile: (folder?: string, name?: string) => Promise<void>;
   createNewFolder: (name: string, parentFolder?: string) => Promise<void>;
   renameEntry: (oldPath: string, newName: string) => Promise<void>;
@@ -204,6 +256,9 @@ let initializing = false;
 let restoringSession = false;
 let sessionPersistenceReady = false;
 
+let pendingWSQueue: Record<string, any>[] = [];
+let pendingWSFrame: number | null = null;
+
 const INITIAL_PANE_ID = 'pane_main';
 const initialSession = initialWorkspaceSession(bootstrapConfig?.workspace_dir || '');
 
@@ -239,17 +294,15 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     bootstrapConfig?.sidebar_position || (window.localStorage.getItem('saturno_sidebar_pos') as 'left' | 'right') || 'left',
   sidebarWidth: bootstrapConfig?.sidebar_width || Number(window.localStorage.getItem('saturno_sidebar_width')) || 280,
   showLineNumbers: bootstrapConfig?.show_line_numbers ?? true,
-  autoScrollOnRun: true,
+  autoScrollOnRun: bootstrapConfig?.auto_scroll_on_run ?? true,
   showModifiedTime: bootstrapConfig?.show_modified_time ?? true,
-  confirmKernelRestart: false,
+  confirmKernelRestart: bootstrapConfig?.confirm_kernel_restart ?? false,
   editorFontSize: bootstrapConfig?.editor_font_size || Number(window.localStorage.getItem('saturno_font_size')) || 14,
   tableOutputSettings: bootstrapConfig?.table_output
     ? normalizeTableOutputSettings(bootstrapConfig.table_output)
     : loadStoredTableOutputSettings(),
 
   showFolderModal: false,
-  showAIModal: false,
-  showShortcutsModal: false,
   showSettingsModal: false,
   settingsSection: 'appearance',
   statusMessage: 'Pronto',
@@ -482,30 +535,14 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   setShowFolderModal: (v) => set({ showFolderModal: v }),
-  setShowAIModal: (v) =>
-    set({
-      showAIModal: v,
-      showSettingsModal: v,
-      settingsSection: v ? 'ai' : get().settingsSection,
-    }),
-  setShowShortcutsModal: (v) =>
-    set({
-      showShortcutsModal: v,
-      showSettingsModal: v,
-      settingsSection: v ? 'shortcuts' : get().settingsSection,
-    }),
   openSettings: (section = 'appearance') =>
     set({
       showSettingsModal: true,
       settingsSection: section,
-      showAIModal: false,
-      showShortcutsModal: false,
     }),
   closeSettings: () =>
     set({
       showSettingsModal: false,
-      showAIModal: false,
-      showShortcutsModal: false,
     }),
 
   toggleLineNumbers: () => {
@@ -836,9 +873,9 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     }, 120);
   },
 
-  createNewNotebook: async (folder) => {
+  createNewNotebook: async (folder, name) => {
     const targetFolder = folder !== undefined ? folder : get().activeFolderContext || '';
-    const nb = await api.createNotebook(targetFolder);
+    const nb = await api.createNotebook(targetFolder, name);
     if (targetFolder) {
       get().setFolderExpanded(targetFolder, true);
     }
@@ -904,23 +941,67 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     const res = await api.renameEntry(oldPath, newName);
     await get().refreshFiles();
     set((s) => {
-      const updatedTabs = s.tabs.map((t) =>
-        t.id === oldPath
-          ? ({ ...t, id: res.new_path, path: res.new_path, name: res.name } as WorkspaceTab)
-          : t
-      );
+      const nextExpanded: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(s.expandedFolders)) {
+        const mapped = remapPathPrefix(k, oldPath, res.new_path);
+        nextExpanded[mapped ?? k] = v;
+      }
+      saveExpandedFolders(nextExpanded);
+
+      const nextChildren: Record<string, FileEntry[]> = {};
+      for (const [k, v] of Object.entries(s.folderChildren)) {
+        const mapped = remapPathPrefix(k, oldPath, res.new_path);
+        nextChildren[mapped ?? k] = v;
+      }
+
+      const tabIdMap = new Map<string, string>();
+      const updatedTabs = s.tabs.map((t) => {
+        if (t.kind === 'launcher') return t;
+        const mappedPath = remapPathPrefix(t.id, oldPath, res.new_path);
+        if (!mappedPath) return t;
+        tabIdMap.set(t.id, mappedPath);
+        const nextTitle = t.id === oldPath ? res.name : t.name;
+        if (t.kind === 'notebook') {
+          return {
+            ...t,
+            id: mappedPath,
+            path: mappedPath,
+            name: nextTitle,
+            kernelStatus: 'stopped',
+            variables: [],
+            cells: t.cells.map((c) => ({ ...c, isRunning: false })),
+          } as WorkspaceTab;
+        }
+        return {
+          ...t,
+          id: mappedPath,
+          path: mappedPath,
+          name: nextTitle,
+        } as WorkspaceTab;
+      });
+
       const updatedPanes = s.panes.map((p) => ({
         ...p,
-        tabIds: p.tabIds.map((id) => (id === oldPath ? res.new_path : id)),
-        activeTabId: p.activeTabId === oldPath ? res.new_path : p.activeTabId,
+        tabIds: p.tabIds.map((id) => tabIdMap.get(id) ?? id),
+        activeTabId: tabIdMap.get(p.activeTabId) ?? p.activeTabId,
       }));
+
+      const nextFolderCtx =
+        remapPathPrefix(s.activeFolderContext, oldPath, res.new_path) ?? s.activeFolderContext;
+
       return {
         tabs: updatedTabs,
         panes: updatedPanes,
-        activeTabId: s.activeTabId === oldPath ? res.new_path : s.activeTabId,
-        selectedFilePaths: s.selectedFilePaths.map((p) =>
-          p === oldPath ? res.new_path : p
+        activeTabId: tabIdMap.get(s.activeTabId) ?? s.activeTabId,
+        expandedFolders: nextExpanded,
+        folderChildren: nextChildren,
+        activeFolderContext: nextFolderCtx,
+        selectedFilePaths: s.selectedFilePaths.map(
+          (p) => remapPathPrefix(p, oldPath, res.new_path) ?? p
         ),
+        lastClickedFilePath: s.lastClickedFilePath
+          ? remapPathPrefix(s.lastClickedFilePath, oldPath, res.new_path) ?? s.lastClickedFilePath
+          : null,
         statusMessage: `Renomeado para ${res.name}`,
       };
     });
@@ -928,26 +1009,71 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
 
   deleteEntry: async (relPath) => {
     await api.deleteEntry(relPath);
-    get().closeTab(relPath);
+    const affectedTabIds = get()
+      .tabs.filter((t) => t.kind !== 'launcher' && isPathOrDescendant(t.id, relPath))
+      .map((t) => t.id);
+    for (const tid of affectedTabIds) {
+      get().closeTab(tid);
+    }
+    set((s) => {
+      const nextExpanded: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(s.expandedFolders)) {
+        if (!isPathOrDescendant(k, relPath)) nextExpanded[k] = v;
+      }
+      saveExpandedFolders(nextExpanded);
+      const nextChildren: Record<string, FileEntry[]> = {};
+      for (const [k, v] of Object.entries(s.folderChildren)) {
+        if (!isPathOrDescendant(k, relPath)) nextChildren[k] = v;
+      }
+      return {
+        expandedFolders: nextExpanded,
+        folderChildren: nextChildren,
+        activeFolderContext: isPathOrDescendant(s.activeFolderContext, relPath)
+          ? ''
+          : s.activeFolderContext,
+        selectedFilePaths: s.selectedFilePaths.filter((p) => !isPathOrDescendant(p, relPath)),
+        statusMessage: `Removido: ${relPath}`,
+      };
+    });
     await get().refreshFiles();
-    set((s) => ({
-      selectedFilePaths: s.selectedFilePaths.filter((p) => p !== relPath),
-      statusMessage: `Removido: ${relPath}`,
-    }));
   },
 
   deleteBatchEntries: async (paths) => {
     if (!paths.length) return;
     const res = await api.deleteBatch(paths);
-    for (const p of paths) {
-      get().closeTab(p);
+    const affectedTabIds = get()
+      .tabs.filter(
+        (t) =>
+          t.kind !== 'launcher' && paths.some((deleted) => isPathOrDescendant(t.id, deleted))
+      )
+      .map((t) => t.id);
+    for (const tid of affectedTabIds) {
+      get().closeTab(tid);
     }
-    await get().refreshFiles();
-    set({
-      selectedFilePaths: [],
-      lastClickedFilePath: null,
-      statusMessage: `${res.deleted.length} item(ns) removido(s)`,
+    set((s) => {
+      const nextExpanded: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(s.expandedFolders)) {
+        if (!paths.some((deleted) => isPathOrDescendant(k, deleted))) nextExpanded[k] = v;
+      }
+      saveExpandedFolders(nextExpanded);
+      const nextChildren: Record<string, FileEntry[]> = {};
+      for (const [k, v] of Object.entries(s.folderChildren)) {
+        if (!paths.some((deleted) => isPathOrDescendant(k, deleted))) nextChildren[k] = v;
+      }
+      return {
+        expandedFolders: nextExpanded,
+        folderChildren: nextChildren,
+        activeFolderContext: paths.some((deleted) =>
+          isPathOrDescendant(s.activeFolderContext, deleted)
+        )
+          ? ''
+          : s.activeFolderContext,
+        selectedFilePaths: [],
+        lastClickedFilePath: null,
+        statusMessage: `${res.deleted.length} item(ns) removido(s)`,
+      };
     });
+    await get().refreshFiles();
   },
 
   moveEntries: async (paths, targetFolder) => {
@@ -956,19 +1082,57 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     if (targetFolder) {
       get().setFolderExpanded(targetFolder, true);
     }
-    await get().refreshFiles();
 
     const moveMap = new Map(res.moved.map((m) => [m.old_path, m]));
     // Moving a folder also changes the identity of every open descendant.
     for (const tab of get().tabs) {
-      const parent = res.moved.find(m => tab.id.startsWith(m.old_path + '/'));
-      if (parent) moveMap.set(tab.id, {old_path: tab.id, new_path: parent.new_path + tab.id.slice(parent.old_path.length), name: tab.name});
+      const parent = res.moved.find((m) => tab.id.startsWith(m.old_path + '/'));
+      if (parent) {
+        moveMap.set(tab.id, {
+          old_path: tab.id,
+          new_path: parent.new_path + tab.id.slice(parent.old_path.length),
+          name: tab.name,
+        });
+      }
     }
     set((s) => {
+      const nextExpanded: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(s.expandedFolders)) {
+        const hit = res.moved.find((m) => isPathOrDescendant(k, m.old_path));
+        const mapped = hit ? remapPathPrefix(k, hit.old_path, hit.new_path) : null;
+        nextExpanded[mapped ?? k] = v;
+      }
+      saveExpandedFolders(nextExpanded);
+
+      const nextChildren: Record<string, FileEntry[]> = {};
+      for (const [k, v] of Object.entries(s.folderChildren)) {
+        const hit = res.moved.find((m) => isPathOrDescendant(k, m.old_path));
+        const mapped = hit ? remapPathPrefix(k, hit.old_path, hit.new_path) : null;
+        nextChildren[mapped ?? k] = v;
+      }
+
+      const ctxHit = res.moved.find((m) => isPathOrDescendant(s.activeFolderContext, m.old_path));
+      const nextFolderCtx = ctxHit
+        ? remapPathPrefix(s.activeFolderContext, ctxHit.old_path, ctxHit.new_path) ??
+          s.activeFolderContext
+        : s.activeFolderContext;
+
       const updatedTabs = s.tabs.map((t) => {
         const m = moveMap.get(t.id);
         return m
-          ? ({ ...t, id: m.new_path, path: m.new_path, name: m.name, ...(t.kind === 'notebook' ? {kernelStatus: 'stopped', variables: [], cells: t.cells.map(c => ({...c, isRunning: false}))} : {}) } as WorkspaceTab)
+          ? ({
+              ...t,
+              id: m.new_path,
+              path: m.new_path,
+              name: m.name,
+              ...(t.kind === 'notebook'
+                ? {
+                    kernelStatus: 'stopped',
+                    variables: [],
+                    cells: t.cells.map((c) => ({ ...c, isRunning: false })),
+                  }
+                : {}),
+            } as WorkspaceTab)
           : t;
       });
       const updatedPanes = s.panes.map((p) => ({
@@ -980,11 +1144,15 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         tabs: updatedTabs,
         panes: updatedPanes,
         activeTabId: moveMap.get(s.activeTabId)?.new_path || s.activeTabId,
+        expandedFolders: nextExpanded,
+        folderChildren: nextChildren,
+        activeFolderContext: nextFolderCtx,
         selectedFilePaths: [],
         lastClickedFilePath: null,
         statusMessage: `${res.moved.length} item(ns) movido(s) para ${targetFolder || '/'}`,
       };
     });
+    await get().refreshFiles();
   },
 
   setActivePane: (paneId) => {
@@ -1057,8 +1225,37 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         nextPanes = nextPanes.filter((p) => p.tabIds.length > 0);
       }
 
+      const allEmpty = nextPanes.length === 0 || nextPanes.every((p) => p.tabIds.length === 0);
+      const stillReferenced = !allEmpty && nextPanes.some((p) => p.tabIds.includes(id));
+
+      let nextInlineAI = s.inlineAI;
+      let nextDeletedStack = s.deletedCellStack;
+      if (!stillReferenced) {
+        const closingTab = s.tabs.find((t) => t.id === id);
+        if (closingTab?.kind === 'notebook') {
+          let aiMutated = false;
+          const aiCopy = { ...s.inlineAI };
+          for (const cell of closingTab.cells) {
+            const aiSt = aiCopy[cell.id];
+            if (aiSt) {
+              if (aiSt.status === 'streaming' && aiSt.requestId) {
+                wsClient.send({ action: 'ai_cancel', request_id: aiSt.requestId });
+              }
+              delete aiCopy[cell.id];
+              aiMutated = true;
+            }
+          }
+          if (aiMutated) nextInlineAI = aiCopy;
+          if (s.deletedCellStack.some((r) => r.notebookPath === closingTab.path)) {
+            nextDeletedStack = s.deletedCellStack.filter(
+              (r) => r.notebookPath !== closingTab.path
+            );
+          }
+        }
+      }
+
       // If all panes became empty, restore Launcher in a single pane
-      if (nextPanes.length === 0 || nextPanes.every((p) => p.tabIds.length === 0)) {
+      if (allEmpty) {
         const launcherTab: WorkspaceTab = {
           kind: 'launcher',
           id: '__launcher__',
@@ -1080,13 +1277,12 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
           ],
           activePaneId: INITIAL_PANE_ID,
           activeTabId: '__launcher__',
+          inlineAI: nextInlineAI,
+          deletedCellStack: nextDeletedStack,
         };
       }
 
-      // Check if tabId is still open in any pane; if not, remove it from tabs
-      const stillReferenced = nextPanes.some((p) => p.tabIds.includes(id));
       const nextTabs = stillReferenced ? s.tabs : s.tabs.filter((t) => t.id !== id);
-
       const currentActivePane =
         nextPanes.find((p) => p.id === s.activePaneId) || nextPanes[nextPanes.length - 1];
 
@@ -1095,6 +1291,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         panes: nextPanes,
         activePaneId: currentActivePane.id,
         activeTabId: currentActivePane.activeTabId,
+        inlineAI: nextInlineAI,
+        deletedCellStack: nextDeletedStack,
       };
     });
   },
@@ -1511,7 +1709,10 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     if (tab.cells.length <= 1) {
       set((s) => ({
         deletedCellStack: deletedCell
-          ? [...s.deletedCellStack, { notebookPath: tab.path, cell: { ...deletedCell }, index: 0 }]
+          ? [
+              ...s.deletedCellStack,
+              { notebookPath: tab.path, cell: { ...deletedCell }, index: 0 },
+            ].slice(-MAX_DELETED_CELL_STACK)
           : s.deletedCellStack,
         tabs: s.tabs.map((t) =>
           t.id === tab.id && t.kind === 'notebook'
@@ -1542,7 +1743,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         ? [
             ...s.deletedCellStack,
             { notebookPath: tab.path, cell: { ...deletedCell }, index: idx },
-          ]
+          ].slice(-MAX_DELETED_CELL_STACK)
         : s.deletedCellStack,
       tabs: s.tabs.map((t) =>
         t.id === tab.id && t.kind === 'notebook'
@@ -1750,19 +1951,53 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   runAllCells: () => {
     const tab = get().tabs.find((t) => t.id === get().activeTabId);
     if (!tab || tab.kind !== 'notebook') return;
-    for (const c of tab.cells) {
-      if (c.cell_type === 'markdown') {
-        get().setMarkdownRendered(c.id, true);
-      } else if (c.source.trim()) {
-        get().runCell(c.id, 'none');
-      }
+    const collapseDefault = get().config?.output_display === 'collapsed';
+    const codeCellsToRun = tab.cells.filter(
+      (c) => c.cell_type === 'code' && Boolean(c.source.trim())
+    );
+    const runIds = new Set(codeCellsToRun.map((c) => c.id));
+    const batchId = `batch_${makeId()}`;
+
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === tab.id && t.kind === 'notebook'
+          ? {
+              ...t,
+              kernelStatus: codeCellsToRun.length > 0 ? 'busy' : t.kernelStatus,
+              cells: t.cells.map((c) => {
+                if (c.cell_type === 'markdown') {
+                  return c.markdownRendered ? c : { ...c, markdownRendered: true };
+                }
+                if (runIds.has(c.id)) {
+                  return {
+                    ...c,
+                    outputs: [],
+                    isRunning: true,
+                    outputCollapsed: collapseDefault,
+                  };
+                }
+                return c;
+              }),
+            }
+          : t
+      ),
+    }));
+
+    for (const c of codeCellsToRun) {
+      wsClient.send({
+        action: 'execute_cell',
+        notebook_path: tab.path,
+        cell_id: c.id,
+        code: c.source,
+        batch_id: batchId,
+        stop_on_error: true,
+      });
     }
   },
 
   interruptKernel: async () => {
     const tab = get().tabs.find((t) => t.id === get().activeTabId);
     if (!tab || tab.kind !== 'notebook') return;
-    wsClient.send({ action: 'interrupt_kernel', notebook_path: tab.path });
     await api.interruptKernel(tab.path);
     set({ statusMessage: 'Kernel interrompido' });
   },
@@ -1962,8 +2197,182 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
   },
 
   handleWSMessage: (msg) => {
-    if (get().tabs.some(tab => tab.kind === 'notebook' && tab.path === msg.notebook_path && tab.loading)) return;
+    const flushPending = () => {
+      if (pendingWSFrame !== null) {
+        if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+          window.cancelAnimationFrame(pendingWSFrame);
+        } else {
+          clearTimeout(pendingWSFrame);
+        }
+        pendingWSFrame = null;
+      }
+      if (pendingWSQueue.length === 0) return;
+      const batch = pendingWSQueue;
+      pendingWSQueue = [];
+
+      set((s) => {
+        let nextTabs = s.tabs;
+        let nextInlineAI = s.inlineAI;
+        let lastOutputTarget: { notebookPath: string; cellId: string } | null = null;
+        let tabsCloned = false;
+        let aiCloned = false;
+
+        for (const item of batch) {
+          if (item.type === 'cell_output') {
+            const tabIdx = nextTabs.findIndex(
+              (t) => t.kind === 'notebook' && t.path === item.notebook_path && !t.loading
+            );
+            if (tabIdx === -1) continue;
+            const nbTab = nextTabs[tabIdx] as OpenNotebookTab;
+            const cellIdx = nbTab.cells.findIndex((c) => c.id === item.cell_id);
+            if (cellIdx === -1) continue;
+
+            if (!tabsCloned) {
+              nextTabs = [...nextTabs];
+              tabsCloned = true;
+            }
+            const cell = nbTab.cells[cellIdx];
+            const incoming = item.output;
+            const prevOutputs = [...cell.outputs];
+            if (
+              incoming.output_type === 'stream' &&
+              prevOutputs.length > 0 &&
+              prevOutputs[prevOutputs.length - 1].output_type === 'stream' &&
+              prevOutputs[prevOutputs.length - 1].name === incoming.name
+            ) {
+              const last = prevOutputs[prevOutputs.length - 1];
+              prevOutputs[prevOutputs.length - 1] = {
+                ...last,
+                text: mergeStreamText(last.text || '', incoming.text || ''),
+              };
+            } else if (incoming.output_type === 'stream') {
+              prevOutputs.push({
+                ...incoming,
+                text: mergeStreamText('', incoming.text || ''),
+              });
+            } else {
+              prevOutputs.push(incoming);
+            }
+
+            const nextCells = [...nbTab.cells];
+            nextCells[cellIdx] = { ...cell, outputs: prevOutputs };
+            nextTabs[tabIdx] = { ...nbTab, dirty: true, cells: nextCells };
+            lastOutputTarget = { notebookPath: item.notebook_path, cellId: item.cell_id };
+          } else if (item.type === 'ai_chunk') {
+            const cur = nextInlineAI[item.cell_id];
+            if (!cur || cur.requestId !== item.request_id) continue;
+            if (!aiCloned) {
+              nextInlineAI = { ...nextInlineAI };
+              aiCloned = true;
+            }
+            nextInlineAI[item.cell_id] = {
+              ...cur,
+              status: 'streaming',
+              streamedCode: cur.streamedCode + (item.delta || ''),
+            };
+          }
+        }
+
+        if (!tabsCloned && !aiCloned) return s;
+
+        return {
+          ...(tabsCloned ? { tabs: nextTabs } : {}),
+          ...(aiCloned ? { inlineAI: nextInlineAI } : {}),
+          ...(lastOutputTarget && s.autoScrollOnRun
+            ? {
+                scrollSignal: {
+                  notebookPath: lastOutputTarget.notebookPath,
+                  cellId: lastOutputTarget.cellId,
+                  kind: 'output' as const,
+                  seq: (s.scrollSignal?.seq || 0) + 1,
+                },
+              }
+            : {}),
+        };
+      });
+    };
+
     const type = msg.type;
+
+    if (type === 'cell_output' || type === 'ai_chunk') {
+      if (
+        type === 'cell_output' &&
+        get().tabs.some(
+          (tab) => tab.kind === 'notebook' && tab.path === msg.notebook_path && tab.loading
+        )
+      ) {
+        return;
+      }
+      pendingWSQueue.push(msg);
+      if (pendingWSFrame === null) {
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+          pendingWSFrame = window.requestAnimationFrame(flushPending);
+        } else {
+          pendingWSFrame = setTimeout(flushPending, 16) as unknown as number;
+        }
+      }
+      return;
+    }
+
+    flushPending();
+
+    if (type === '__ws_disconnected__') {
+      set((s) => {
+        let aiChanged = false;
+        const nextAI = { ...s.inlineAI };
+        for (const [cid, st] of Object.entries(nextAI)) {
+          if (st.status === 'streaming') {
+            nextAI[cid] = {
+              ...st,
+              status: st.streamedCode.trim() ? 'preview' : 'error',
+              errorMessage: st.streamedCode.trim()
+                ? undefined
+                : 'Conexão perdida durante a geração. Tente novamente.',
+            };
+            aiChanged = true;
+          }
+        }
+        return aiChanged ? { inlineAI: nextAI } : s;
+      });
+      return;
+    }
+
+    if (type === '__ws_reconnected__') {
+      api
+        .listKernels()
+        .then((res) => {
+          const activeByPath = new Map(
+            res.kernels.map((k) => [k.notebook_path, k.status])
+          );
+          set((s) => ({
+            tabs: s.tabs.map((t) => {
+              if (t.kind !== 'notebook' || t.loading) return t;
+              const serverStatus = activeByPath.get(t.path);
+              if (!serverStatus) {
+                if (t.kernelStatus === 'not_started') return t;
+                return {
+                  ...t,
+                  kernelStatus: 'stopped',
+                  variables: [],
+                  cells: t.cells.map((c) => (c.isRunning ? { ...c, isRunning: false } : c)),
+                };
+              }
+              return {
+                ...t,
+                kernelStatus: serverStatus as OpenNotebookTab['kernelStatus'],
+                cells:
+                  serverStatus !== 'busy'
+                    ? t.cells.map((c) => (c.isRunning ? { ...c, isRunning: false } : c))
+                    : t.cells,
+              };
+            }),
+          }));
+        })
+        .catch(() => {});
+      return;
+    }
+
+    if (get().tabs.some((tab) => tab.kind === 'notebook' && tab.path === msg.notebook_path && tab.loading)) return;
 
     if (type === 'kernel_status') {
       set((s) => ({
@@ -2010,44 +2419,6 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
             : t
         ),
       }));
-    } else if (type === 'cell_output') {
-      set((s) => ({
-        tabs: s.tabs.map((t) => {
-          if (t.kind !== 'notebook' || t.path !== msg.notebook_path) return t;
-          return {
-            ...t,
-            dirty: true,
-            cells: t.cells.map((c) => {
-              if (c.id !== msg.cell_id) return c;
-              const incoming = msg.output;
-              const prevOutputs = [...c.outputs];
-              if (
-                incoming.output_type === 'stream' &&
-                prevOutputs.length > 0 &&
-                prevOutputs[prevOutputs.length - 1].output_type === 'stream' &&
-                prevOutputs[prevOutputs.length - 1].name === incoming.name
-              ) {
-                const last = prevOutputs[prevOutputs.length - 1];
-                prevOutputs[prevOutputs.length - 1] = {
-                  ...last,
-                  text: (last.text || '') + (incoming.text || ''),
-                };
-              } else {
-                prevOutputs.push(incoming);
-              }
-              return { ...c, outputs: prevOutputs };
-            }),
-          };
-        }),
-        scrollSignal: s.autoScrollOnRun
-          ? {
-              notebookPath: msg.notebook_path,
-              cellId: msg.cell_id,
-              kind: 'output',
-              seq: (s.scrollSignal?.seq || 0) + 1,
-            }
-          : s.scrollSignal,
-      }));
     } else if (type === 'cell_execution_done') {
       set((s) => ({
         tabs: s.tabs.map((t) =>
@@ -2079,21 +2450,6 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
             }
           : s.scrollSignal,
       }));
-    } else if (type === 'ai_chunk') {
-      set((s) => {
-        const cur = s.inlineAI[msg.cell_id];
-        if (!cur || cur.requestId !== msg.request_id) return s;
-        return {
-          inlineAI: {
-            ...s.inlineAI,
-            [msg.cell_id]: {
-              ...cur,
-              status: 'streaming',
-              streamedCode: cur.streamedCode + (msg.delta || ''),
-            },
-          },
-        };
-      });
     } else if (type === 'ai_done') {
       set((s) => {
         const cur = s.inlineAI[msg.cell_id];
@@ -2105,6 +2461,20 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
               ...cur,
               status: 'preview',
               streamedCode: msg.code ?? cur.streamedCode,
+            },
+          },
+        };
+      });
+    } else if (type === 'ai_cancelled') {
+      set((s) => {
+        const cur = s.inlineAI[msg.cell_id];
+        if (!cur || cur.requestId !== msg.request_id) return s;
+        return {
+          inlineAI: {
+            ...s.inlineAI,
+            [msg.cell_id]: {
+              ...cur,
+              status: cur.streamedCode.trim() ? 'preview' : 'idle',
             },
           },
         };

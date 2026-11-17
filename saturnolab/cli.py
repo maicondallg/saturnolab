@@ -77,7 +77,8 @@ def main(argv: list[str] | None = None) -> None:
     os.environ["SATURNOLAB_WORKSPACE"] = str(workspace_path)
 
     port = find_available_port(args.host, args.port)
-    url = f"http://{args.host}:{port}"
+    display_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    url = f"http://{display_host}:{port}"
 
     print(f"🪐 SaturnoLab v{__version__}")
     print(f"📂 Diretório : {workspace_path}")

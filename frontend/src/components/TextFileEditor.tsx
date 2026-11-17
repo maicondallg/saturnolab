@@ -30,9 +30,9 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
   const [viewMode, setViewMode] = useState<'table' | 'text'>(isTabular ? 'table' : 'text');
 
   const parsedCsv = useMemo(() => {
-    if (!isTabular) return null;
+    if (!isTabular || viewMode !== 'table') return null;
     return parseCsv(tab.content, isTsv ? '\t' : undefined);
-  }, [isTabular, isTsv, tab.content]);
+  }, [isTabular, isTsv, viewMode, tab.content]);
 
   const visual = getFileVisual({ name: tab.name, type: 'file' });
   const darkTheme = isThemeDark(config?.theme);

@@ -21,7 +21,6 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   const {
     notebookMode,
     notebookLayout,
-    scrollSignal,
     saveTabById,
     addCellAbove,
     addCellBelow,
@@ -44,7 +43,6 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   } = useSaturnoStore(useShallow((s) => ({
     notebookMode: isActivePane ? s.notebookMode : 'command',
     notebookLayout: s.notebookLayout,
-    scrollSignal: s.scrollSignal,
     saveTabById: s.saveTabById,
     addCellAbove: s.addCellAbove,
     addCellBelow: s.addCellBelow,
@@ -67,7 +65,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   })));
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const handledScrollRef = useRef(scrollSignal);
+  const handledScrollRef = useRef(useSaturnoStore.getState().scrollSignal);
   const lastChordRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
 
   const visibleCells = useMemo(() => {
@@ -76,60 +74,89 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   }, [tab.cells]);
   const activeCell = tab.cells.find((c) => c.id === tab.activeCellId);
 
-  // Auto-scroll to cell or cell result when executed / navigated
+  // Auto-scroll to cell or cell result without triggering NotebookView re-renders
   useEffect(() => {
-    if (handledScrollRef.current === scrollSignal) return;
-    handledScrollRef.current = scrollSignal;
-    if (!isVisible || !scrollSignal || scrollSignal.notebookPath !== tab.path) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
+    if (!isVisible) return;
+    let rafId: number | null = null;
 
-    const timer = window.requestAnimationFrame(() => {
-      const cellEl = container.querySelector(
-        `[data-cell-id="${scrollSignal.cellId}"]`
-      ) as HTMLElement | null;
-      const outputEl = container.querySelector(
-        `[data-cell-output-id="${scrollSignal.cellId}"]`
-      ) as HTMLElement | null;
-      const bottomEl = container.querySelector(
-        `[data-cell-bottom-id="${scrollSignal.cellId}"]`
-      ) as HTMLElement | null;
+    const applyScroll = (scrollSignal: ReturnType<typeof useSaturnoStore.getState>['scrollSignal']) => {
+      if (handledScrollRef.current === scrollSignal) return;
+      handledScrollRef.current = scrollSignal;
+      if (!scrollSignal || scrollSignal.notebookPath !== tab.path) return;
+      const container = scrollContainerRef.current;
+      if (!container) return;
 
-      const targetEl =
-        scrollSignal.kind === 'output'
-          ? outputEl || bottomEl || cellEl
-          : cellEl;
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        const cellEl = container.querySelector(
+          `[data-cell-id="${scrollSignal.cellId}"]`
+        ) as HTMLElement | null;
+        const outputEl = container.querySelector(
+          `[data-cell-output-id="${scrollSignal.cellId}"]`
+        ) as HTMLElement | null;
+        const bottomEl = container.querySelector(
+          `[data-cell-bottom-id="${scrollSignal.cellId}"]`
+        ) as HTMLElement | null;
 
-      if (!targetEl) return;
+        const targetEl =
+          scrollSignal.kind === 'output'
+            ? outputEl || bottomEl || cellEl
+            : cellEl;
 
-      const containerRect = container.getBoundingClientRect();
-      const targetRect = targetEl.getBoundingClientRect();
+        if (!targetEl) return;
 
-      const topMargin = 24;
-      const bottomMargin = 64;
+        const containerRect = container.getBoundingClientRect();
+        const targetRect = targetEl.getBoundingClientRect();
 
-      if (scrollSignal.kind === 'output') {
-        // Ensure the bottom of the output/result is visible without cutting off the cell if it fits
-        if (targetRect.bottom > containerRect.bottom - bottomMargin) {
-          const delta = targetRect.bottom - (containerRect.bottom - bottomMargin);
-          container.scrollBy({ top: delta, behavior: 'smooth' });
-        } else if (targetRect.top < containerRect.top + topMargin) {
-          const delta = targetRect.top - (containerRect.top + topMargin);
-          container.scrollBy({ top: delta, behavior: 'smooth' });
+        const topMargin = 24;
+        const bottomMargin = 64;
+
+        if (scrollSignal.kind === 'output') {
+          if (targetRect.bottom > containerRect.bottom - bottomMargin) {
+            const delta = targetRect.bottom - (containerRect.bottom - bottomMargin);
+            container.scrollBy({ top: delta, behavior: 'smooth' });
+          } else if (targetRect.top < containerRect.top + topMargin) {
+            const delta = targetRect.top - (containerRect.top + topMargin);
+            container.scrollBy({ top: delta, behavior: 'smooth' });
+          }
+        } else {
+          if (targetRect.top < containerRect.top + topMargin) {
+            const delta = targetRect.top - (containerRect.top + topMargin);
+            container.scrollBy({ top: delta, behavior: 'smooth' });
+          } else if (targetRect.bottom > containerRect.bottom - bottomMargin) {
+            const delta = targetRect.bottom - (containerRect.bottom - bottomMargin);
+            container.scrollBy({ top: delta, behavior: 'smooth' });
+          }
         }
-      } else {
-        if (targetRect.top < containerRect.top + topMargin) {
-          const delta = targetRect.top - (containerRect.top + topMargin);
-          container.scrollBy({ top: delta, behavior: 'smooth' });
-        } else if (targetRect.bottom > containerRect.bottom - bottomMargin) {
-          const delta = targetRect.bottom - (containerRect.bottom - bottomMargin);
-          container.scrollBy({ top: delta, behavior: 'smooth' });
-        }
+      });
+    };
+
+    applyScroll(useSaturnoStore.getState().scrollSignal);
+    const unsub = useSaturnoStore.subscribe((state, prev) => {
+      if (state.scrollSignal !== prev.scrollSignal) {
+        applyScroll(state.scrollSignal);
       }
     });
 
-    return () => window.cancelAnimationFrame(timer);
-  }, [scrollSignal, tab.path, isVisible]);
+    return () => {
+      unsub();
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+    };
+  }, [tab.path, isVisible]);
+
+  const keyStateRef = useRef({
+    notebookMode,
+    activeCell,
+    visibleCells,
+    tabId: tab.id,
+  });
+  keyStateRef.current = {
+    notebookMode,
+    activeCell,
+    visibleCells,
+    tabId: tab.id,
+  };
 
   useEffect(() => {
     if (!isActivePane) return;
@@ -137,6 +164,13 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && target.closest('[data-modal-root="true"], .workspace-sidebar, .activity-rail, [data-app-menu]')) return;
+
+      const {
+        notebookMode: curMode,
+        activeCell: curCell,
+        visibleCells: curVisibleCells,
+        tabId: curTabId,
+      } = keyStateRef.current;
 
       const inInput =
         target &&
@@ -147,7 +181,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        saveTabById(tab.id);
+        saveTabById(curTabId);
         return;
       }
 
@@ -157,16 +191,16 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
         !inInput
       ) {
         e.preventDefault();
-        if (activeCell) {
-          selectCell(activeCell.id, 'edit');
-          openInlineAI(activeCell.id, null);
+        if (curCell) {
+          selectCell(curCell.id, 'edit');
+          openInlineAI(curCell.id, null);
         }
         return;
       }
 
-      if (inInput || notebookMode !== 'command' || !activeCell) return;
+      if (inInput || curMode !== 'command' || !curCell) return;
 
-      const idx = visibleCells.findIndex((c) => c.id === activeCell.id);
+      const idx = curVisibleCells.findIndex((c) => c.id === curCell.id);
       const lowerKey = e.key.toLowerCase();
       const now = Date.now();
 
@@ -198,7 +232,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
           if (lastChordRef.current.key === 'd' && now - lastChordRef.current.time < 600) {
             e.preventDefault();
             lastChordRef.current = { key: '', time: 0 };
-            deleteCell(activeCell.id);
+            deleteCell(curCell.id);
             return;
           }
           lastChordRef.current = { key: 'd', time: now };
@@ -210,58 +244,58 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
 
       if (e.key === 'Enter' && e.shiftKey) {
         e.preventDefault();
-        runCell(activeCell.id, 'next');
+        runCell(curCell.id, 'next');
       } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        runCell(activeCell.id, 'none');
+        runCell(curCell.id, 'none');
       } else if (e.key === 'Enter' && e.altKey) {
         e.preventDefault();
-        runCell(activeCell.id, 'insert');
+        runCell(curCell.id, 'insert');
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (activeCell.cell_type === 'markdown') {
-          setMarkdownRendered(activeCell.id, false);
+        if (curCell.cell_type === 'markdown') {
+          setMarkdownRendered(curCell.id, false);
         }
-        selectCell(activeCell.id, 'edit');
+        selectCell(curCell.id, 'edit');
       } else if (e.altKey && e.key === 'ArrowUp') {
         e.preventDefault();
-        moveCell(activeCell.id, 'up');
+        moveCell(curCell.id, 'up');
       } else if (e.altKey && e.key === 'ArrowDown') {
         e.preventDefault();
-        moveCell(activeCell.id, 'down');
+        moveCell(curCell.id, 'down');
       } else if (e.key === 'ArrowUp' || lowerKey === 'k') {
         e.preventDefault();
-        if (idx > 0) selectCell(visibleCells[idx - 1].id, 'command', true);
+        if (idx > 0) selectCell(curVisibleCells[idx - 1].id, 'command', true);
       } else if (e.key === 'ArrowDown' || lowerKey === 'j') {
         e.preventDefault();
-        if (idx < visibleCells.length - 1) selectCell(visibleCells[idx + 1].id, 'command', true);
+        if (idx < curVisibleCells.length - 1) selectCell(curVisibleCells[idx + 1].id, 'command', true);
       } else if (lowerKey === 'a' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        addCellAbove(activeCell.id, 'code');
+        addCellAbove(curCell.id, 'code');
       } else if (lowerKey === 'b' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        addCellBelow(activeCell.id, 'code');
+        addCellBelow(curCell.id, 'code');
       } else if (
         (lowerKey === 'm' && !e.ctrlKey && !e.metaKey) ||
         ((e.ctrlKey || e.metaKey) && lowerKey === 'm')
       ) {
         e.preventDefault();
         changeCellType(
-          activeCell.id,
-          activeCell.cell_type === 'code' ? 'markdown' : 'code'
+          curCell.id,
+          curCell.cell_type === 'code' ? 'markdown' : 'code'
         );
       } else if (lowerKey === 'y' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        changeCellType(activeCell.id, 'code');
+        changeCellType(curCell.id, 'code');
       } else if (lowerKey === 'x' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        cutCell(activeCell.id);
+        cutCell(curCell.id);
       } else if (lowerKey === 'c' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        copyCell(activeCell.id);
+        copyCell(curCell.id);
       } else if (lowerKey === 'v' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        pasteCellBelow(activeCell.id);
+        pasteCellBelow(curCell.id);
       } else if (lowerKey === 'z' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         undoDeleteCell();
@@ -270,14 +304,14 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
         toggleLineNumbers();
       } else if (lowerKey === 'o' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        toggleCellOutputCollapse(activeCell.id);
+        toggleCellOutputCollapse(curCell.id);
       } else if (
         (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
         e.key === 'Backspace'
       ) {
         e.preventDefault();
-        deleteCell(activeCell.id);
+        deleteCell(curCell.id);
       }
     };
 
@@ -285,10 +319,6 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
   }, [
     isActivePane,
-    notebookMode,
-    activeCell,
-    tab.id,
-    tab.cells,
     saveTabById,
     selectCell,
     openInlineAI,

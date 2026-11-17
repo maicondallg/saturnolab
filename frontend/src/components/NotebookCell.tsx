@@ -30,7 +30,8 @@ interface Props {
 
 export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => {
   const {
-    config,
+    darkTheme,
+    outputLimitedDefault,
     notebookMode,
     showLineNumbers,
     aiState,
@@ -46,7 +47,8 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
     saveActiveTab,
     openInlineAI,
   } = useSaturnoStore(useShallow((s) => ({
-    config: s.config,
+    darkTheme: isThemeDark(s.config?.theme),
+    outputLimitedDefault: s.config?.output_display === 'limited',
     notebookMode: isActive ? s.notebookMode : 'command',
     showLineNumbers: s.showLineNumbers,
     aiState: s.inlineAI[cell.id],
@@ -69,14 +71,13 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
       'Corrija o erro desta célula mantendo o objetivo do código', errSummary);
   }, [cell.id, selectCell, openInlineAI]);
 
-  const [outputLimited, setOutputLimited] = useState(config?.output_display === 'limited');
+  const [outputLimited, setOutputLimited] = useState(outputLimitedDefault);
 
   useEffect(() => {
-    if (cell.isRunning) setOutputLimited(config?.output_display === 'limited');
-  }, [cell.isRunning, config?.output_display]);
+    if (cell.isRunning) setOutputLimited(outputLimitedDefault);
+  }, [cell.isRunning, outputLimitedDefault]);
   const heading = notebookOutline([cell])[0];
   const isEditing = isActive && notebookMode === 'edit';
-  const darkTheme = isThemeDark(config?.theme);
 
   const renderedMarkdownHtml = useMemo(() => {
     if (cell.cell_type !== 'markdown') return '';

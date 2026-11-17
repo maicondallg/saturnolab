@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Annotation, EditorState, Compartment } from '@codemirror/state';
+import { Annotation, EditorState, Compartment, Prec } from '@codemirror/state';
 import {
   EditorView,
   keymap,
@@ -10,14 +10,19 @@ import {
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import {
+  LanguageSupport,
   syntaxHighlighting,
   HighlightStyle,
   bracketMatching,
 } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { python } from '@codemirror/lang-python';
-import { markdown } from '@codemirror/lang-markdown';
+import { markdownLanguage, markdownKeymap } from '@codemirror/lang-markdown';
 import { closeBrackets, autocompletion } from '@codemirror/autocomplete';
+
+function createMarkdownExtension() {
+  return new LanguageSupport(markdownLanguage, Prec.high(keymap.of(markdownKeymap)));
+}
 
 const externalSyncAnnotation = Annotation.define<boolean>();
 
@@ -341,7 +346,9 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         saturnoEditorTheme,
         syntaxHighlighting(saturnoHighlightStyle, { fallback: true }),
         keymap.of([...defaultKeymap, ...historyKeymap]),
-        langCompartment.current.of(language === 'python' ? python() : markdown()),
+        langCompartment.current.of(
+          language === 'python' ? python() : createMarkdownExtension()
+        ),
         lineNumCompartment.current.of(showLineNumbers ? lineNumbers() : []),
         placeholder ? cmPlaceholder(placeholder) : [],
         EditorView.lineWrapping,
@@ -398,7 +405,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     appliedOptions.current.language = language;
     view.dispatch({
       effects: langCompartment.current.reconfigure(
-        language === 'python' ? python() : markdown()
+        language === 'python' ? python() : createMarkdownExtension()
       ),
     });
   }, [language]);

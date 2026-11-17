@@ -2,13 +2,23 @@ import DOMPurify from 'dompurify';
 
 export type CellValueKind = 'empty' | 'null' | 'bool' | 'number' | 'text';
 
+export interface TableColumnInfo {
+  index: number;
+  label: string;
+  isIndex: boolean;
+}
+
 export interface TableMeta {
   visibleRows: number;
   dataCols: number;
+  totalCols: number;
   shapeLabel: string;
   hasIndexColumn: boolean;
   canStickyIndex: boolean;
   canSort: boolean;
+  canResizeColumns: boolean;
+  canReorderColumns: boolean;
+  columns: TableColumnInfo[];
   hasRowSpanInBody: boolean;
   hasDtypeRow: boolean;
   isTruncated: boolean;
@@ -87,11 +97,16 @@ function isEllipsisToken(text: string): boolean {
 }
 
 function stripGenericDataframeCss(cssText: string): string {
-  // Drop generic Pandas/Polars .dataframe blocks so they cannot leak globally
-  // or override user wrap/alignment settings. Preserve #T_... (Styler) or other IDs.
+  // Drop generic Pandas/Polars .dataframe layout blocks so they cannot leak globally
+  // or override user wrap/alignment settings, while preserving any color/background paintings.
   const withoutDataframeRules = cssText.replace(
-    /[^{}]*\.dataframe[^{}]*\{[^}]*\}/gi,
-    ''
+    /([^{}]*\.dataframe[^{}]*)\{([^}]*)\}/gi,
+    (fullMatch, _selector: string, body: string) => {
+      if (/(?:background|color|border-color|font-style|font-weight|text-decoration)\s*:/i.test(body)) {
+        return fullMatch;
+      }
+      return '';
+    }
   );
   return withoutDataframeRules.trim();
 }
@@ -127,6 +142,39 @@ function detectDtypeRow(thead: HTMLTableSectionElement | null): HTMLTableRowElem
     return candidate;
   }
   return null;
+}
+
+function compactPandasNamedIndexHeader(
+  thead: HTMLTableSectionElement | null,
+  dtypeRow: HTMLTableRowElement | null
+): void {
+  if (!thead) return;
+  const headerRows = Array.from(thead.rows).filter((r) => r !== dtypeRow);
+  if (headerRows.length !== 2) return;
+  const [row0, row1] = headerRows;
+  if (row0.cells.length < 2 || row0.cells.length !== row1.cells.length) return;
+  const hasSpan = [...Array.from(row0.cells), ...Array.from(row1.cells)].some(
+    (c) => c.colSpan > 1 || c.rowSpan > 1
+  );
+  if (hasSpan) return;
+
+  const r0First = (row0.cells[0]?.textContent || '').trim();
+  const r1First = (row1.cells[0]?.textContent || '').trim();
+  const r1RestNonEmpty = Array.from(row1.cells)
+    .slice(1)
+    .some((c) => (c.textContent || '').trim() !== '');
+
+  // Pandas named-index without columns.name creates a second header row containing
+  // only the index name in cell 0 and empty cells for all data columns.
+  if (!r0First && r1First && !r1RestNonEmpty) {
+    row0.cells[0].textContent = r1First;
+    row0.cells[0].setAttribute('title', r1First);
+    const r1Style = row1.cells[0].getAttribute('style');
+    if (r1Style && !row0.cells[0].getAttribute('style')) {
+      row0.cells[0].setAttribute('style', r1Style);
+    }
+    row1.remove();
+  }
 }
 
 function findPrimaryHeaderRow(
@@ -174,6 +222,7 @@ function enhanceTableElement(
     dtypeRow.setAttribute('data-sat-dtype-row', 'true');
   }
 
+  compactPandasNamedIndexHeader(thead, dtypeRow);
   const primaryHeaderRow = findPrimaryHeaderRow(thead, dtypeRow);
 
   if (thead) {
@@ -282,14 +331,13 @@ function enhanceTableElement(
     (!dtypeRow || dtypeRow.cells.length === expectedRowLen) &&
     (!primaryHeaderRow || primaryHeaderRow.cells.length === expectedRowLen);
 
-  // Classify every <td> cell value
+  // Classify every cell value
   for (const tb of tbodies) {
     for (const tr of Array.from(tb.rows)) {
       const isEllipsis = tr.getAttribute('data-sat-ellipsis-row') === 'true';
       for (const cell of Array.from(tr.cells)) {
         if (cell.tagName === 'TH') {
           cell.setAttribute('data-sat-index-cell', 'true');
-          continue;
         }
         const txt = cell.textContent || '';
         if (isEllipsis || isEllipsisToken(txt)) {
@@ -309,16 +357,37 @@ function enhanceTableElement(
     !hasEllipsisRow &&
     dataRowCount > 1;
 
+  const canReorderColumns =
+    isUniformGrid &&
+    Boolean(primaryHeaderRow) &&
+    !headerHasMultiSpan &&
+    expectedRowLen > 1;
+
+  const canResizeColumns = Boolean(primaryHeaderRow) && expectedRowLen > 0;
+  const columns: TableColumnInfo[] = [];
+
   if (isUniformGrid) {
-    const startCol = canStickyIndex ? 1 : 0;
-    for (let col = startCol; col < expectedRowLen; col++) {
+    if (thead) {
+      for (const tr of Array.from(thead.rows)) {
+        if (tr.cells.length === expectedRowLen) {
+          for (let col = 0; col < expectedRowLen; col++) {
+            tr.cells[col]?.setAttribute('data-sat-orig-col', String(col));
+          }
+        }
+      }
+    }
+
+    for (let col = 0; col < expectedRowLen; col++) {
       let hasNumber = false;
       let hasNonNumberText = false;
       let allEllipsisCol = bodyRows.length > 0;
 
       for (const tr of bodyRows) {
-        if (tr.getAttribute('data-sat-ellipsis-row') === 'true') continue;
         const cell = tr.cells[col];
+        if (cell) {
+          cell.setAttribute('data-sat-orig-col', String(col));
+        }
+        if (tr.getAttribute('data-sat-ellipsis-row') === 'true') continue;
         if (!cell) continue;
         const txt = (cell.textContent || '').trim();
         if (!isEllipsisToken(txt)) {
@@ -344,6 +413,7 @@ function enhanceTableElement(
       if (primaryHeaderRow && primaryHeaderRow.cells[col]) {
         const hCell = primaryHeaderRow.cells[col];
         hCell.setAttribute('data-sat-col-type', colType);
+        hCell.setAttribute('data-sat-resizable-col', String(col));
         if (allEllipsisCol) {
           hCell.setAttribute('data-sat-ellipsis-col', 'true');
         } else if (canSort) {
@@ -353,6 +423,14 @@ function enhanceTableElement(
       if (dtypeRow && dtypeRow.cells[col]) {
         dtypeRow.cells[col].setAttribute('data-sat-col-type', colType);
       }
+
+      const isIndex = col === 0 && canStickyIndex;
+      const rawLabel = (primaryHeaderRow?.cells[col]?.textContent || '').trim();
+      columns.push({
+        index: col,
+        label: rawLabel || (isIndex ? 'Índice' : `Coluna ${col + 1}`),
+        isIndex,
+      });
     }
 
     if (canStickyIndex && primaryHeaderRow?.cells[0]) {
@@ -360,6 +438,19 @@ function enhanceTableElement(
     }
   } else {
     // Fallback for irregular/MultiIndex tables
+    if (primaryHeaderRow) {
+      for (let col = 0; col < primaryHeaderRow.cells.length; col++) {
+        const hCell = primaryHeaderRow.cells[col];
+        hCell.setAttribute('data-sat-orig-col', String(col));
+        hCell.setAttribute('data-sat-resizable-col', String(col));
+        const rawLabel = (hCell.textContent || '').trim();
+        columns.push({
+          index: col,
+          label: rawLabel || `Coluna ${col + 1}`,
+          isIndex: col === 0 && canStickyIndex,
+        });
+      }
+    }
     for (const tb of tbodies) {
       for (const tr of Array.from(tb.rows)) {
         for (const cell of Array.from(tr.cells)) {
@@ -383,10 +474,14 @@ function enhanceTableElement(
   return {
     visibleRows,
     dataCols,
+    totalCols,
     shapeLabel: externalShapeLabel || defaultShape,
     hasIndexColumn: indexPrefixCount > 0,
     canStickyIndex,
     canSort,
+    canResizeColumns,
+    canReorderColumns,
+    columns,
     hasRowSpanInBody,
     hasDtypeRow: Boolean(dtypeRow),
     isTruncated: hasEllipsisRow || Boolean(externalShapeLabel && externalShapeLabel !== defaultShape),
@@ -394,7 +489,13 @@ function enhanceTableElement(
 }
 
 export function inspectAndEnhanceHtml(rawHtml: string): ParsedNotebookHtml {
-  const sanitizedHtml = DOMPurify.sanitize(rawHtml);
+  // FORCE_BODY prevents DOMPurify's HTML5 parser from placing leading <style> blocks
+  // (like Pandas Styler #T_... paintings) into <head> and discarding them.
+  const sanitizedHtml = DOMPurify.sanitize(rawHtml, {
+    FORCE_BODY: true,
+    ADD_TAGS: ['style'],
+    ADD_ATTR: ['style', 'class', 'id', 'colspan', 'rowspan', 'scope'],
+  });
   if (!/<table[\s>]/i.test(sanitizedHtml)) {
     return {
       hasTables: false,
@@ -547,28 +648,40 @@ function escapeMarkdownCell(val: string): string {
   return val.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
+export interface ExtractTableOptions {
+  includeHiddenRows?: boolean;
+  includeHiddenCols?: boolean;
+  visibleRowSet?: Set<HTMLTableRowElement>;
+}
+
 export function extractTableDelimited(
   table: HTMLTableElement,
-  format: 'tsv' | 'csv' | 'markdown'
+  format: 'tsv' | 'csv' | 'markdown',
+  options?: ExtractTableOptions
 ): string {
   const headerRows: string[][] = [];
   const bodyRows: string[][] = [];
+  const includeHiddenRows = options?.includeHiddenRows ?? false;
+  const includeHiddenCols = options?.includeHiddenCols ?? false;
+  const visibleRowSet = options?.visibleRowSet;
+
+  const filterCells = (cells: HTMLCollectionOf<HTMLTableCellElement>) =>
+    Array.from(cells)
+      .filter((c) => includeHiddenCols || (!c.hidden && c.getAttribute('data-sat-col-hidden') !== 'true'))
+      .map((c) => (c.textContent || '').trim());
 
   if (table.tHead) {
     for (const tr of Array.from(table.tHead.rows)) {
       if (tr.getAttribute('data-sat-dtype-row') === 'true') continue;
-      headerRows.push(
-        Array.from(tr.cells).map((c) => (c.textContent || '').trim())
-      );
+      headerRows.push(filterCells(tr.cells));
     }
   }
 
   for (const tb of Array.from(table.tBodies)) {
     for (const tr of Array.from(tb.rows)) {
-      if (tr.hidden) continue;
-      bodyRows.push(
-        Array.from(tr.cells).map((c) => (c.textContent || '').trim())
-      );
+      if (!includeHiddenRows && tr.hidden) continue;
+      if (visibleRowSet && !visibleRowSet.has(tr)) continue;
+      bodyRows.push(filterCells(tr.cells));
     }
   }
 

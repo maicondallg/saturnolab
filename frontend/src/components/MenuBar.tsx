@@ -101,7 +101,7 @@ export const MenuBar: React.FC = React.memo(() => {
       <span>SaturnoLab</span>
     </span>
     <button className="ml-1.5 flex items-center gap-1.5 px-2 py-1 rounded text-xs min-w-0 hover:bg-[var(--sat-bg-hover)] text-[var(--sat-text-secondary)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer" onClick={() => actions.setShowFolderModal(true)} title={s.workspaceRoot || 'Abrir pasta'}>
-      <FolderOpen size={14} /><span className="truncate max-w-[240px]">{s.workspaceRoot?.split('/').filter(Boolean).pop() || (s.initialized ? 'Abrir pasta' : '\u00a0')}</span><ChevronDown size={12} />
+      <FolderOpen size={14} /><span className="truncate max-w-[240px]">{s.workspaceRoot?.split(/[\\/]/).filter(Boolean).pop() || (s.initialized ? 'Abrir pasta' : '\u00a0')}</span><ChevronDown size={12} />
     </button>
 
   </header>;
