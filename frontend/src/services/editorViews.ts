@@ -20,3 +20,26 @@ export function loadTextFileView() {
     return module;
   }).catch(error => { fileLoad = undefined; throw error; });
 }
+
+// Registry of active editor/table input flushers so micro-debounced keystrokes
+// or active CSV table inputs commit synchronously before Run, Save, AI, or unload.
+const pendingEditorFlushers = new Map<string, () => void>();
+
+export function registerEditorFlusher(id: string, flush: () => void): () => void {
+  pendingEditorFlushers.set(id, flush);
+  return () => {
+    if (pendingEditorFlushers.get(id) === flush) {
+      pendingEditorFlushers.delete(id);
+    }
+  };
+}
+
+export function flushAllPendingEditors(): void {
+  for (const flush of Array.from(pendingEditorFlushers.values())) {
+    try {
+      flush();
+    } catch {
+      // ignore individual flush errors
+    }
+  }
+}

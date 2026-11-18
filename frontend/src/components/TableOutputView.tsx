@@ -48,6 +48,7 @@ import {
 } from '../utils/tableExportUtils';
 
 interface Props {
+  formatAction?: React.ReactNode;
   rawHtml: string;
   outputLimited?: boolean;
   onExpandTruncated?: () => void;
@@ -120,6 +121,236 @@ interface TableViewportProps {
 
 const VIRTUAL_OVERSCAN_ROWS = 18;
 const PT_BR_COLLATOR = new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'base' });
+const MONO_FONT_FAMILY = '"JetBrains Mono", "Fira Code", "DejaVu Sans Mono", Menlo, Consolas, monospace';
+const UI_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif';
+
+let textMeasureCtx: CanvasRenderingContext2D | null | undefined;
+
+function measureTextWidthPx(text: string, font: string): number {
+  if (!text) return 0;
+  if (textMeasureCtx === undefined) {
+    try {
+      const canvas = document.createElement('canvas');
+      textMeasureCtx = canvas.getContext('2d');
+    } catch {
+      textMeasureCtx = null;
+    }
+  }
+  const lines = text.indexOf('\n') === -1 ? [text] : text.split('\n');
+  let maxW = 0;
+  if (textMeasureCtx) {
+    textMeasureCtx.font = font;
+    for (const line of lines) {
+      const w = textMeasureCtx.measureText(line).width;
+      if (w > maxW) maxW = w;
+    }
+    return maxW;
+  }
+  for (const line of lines) {
+    const w = line.length * 8.2;
+    if (w > maxW) maxW = w;
+  }
+  return maxW;
+}
+
+function getDensityPadX(density: TableOutputSettings['density']): number {
+  return density === 'compact' ? 16 : density === 'comfortable' ? 28 : 22;
+}
+
+function readComputedFont(
+  el: Element | null,
+  fallbackSize: number,
+  fallbackWeight: string,
+  fallbackFamily: string
+): string {
+  if (!el) return `${fallbackWeight} ${fallbackSize}px ${fallbackFamily}`;
+  const cs = window.getComputedStyle(el);
+  const weight = cs.fontWeight || fallbackWeight;
+  const size = cs.fontSize || `${fallbackSize}px`;
+  const family = cs.fontFamily || fallbackFamily;
+  return `${weight} ${size} ${family}`;
+}
+
+function readCellBoxExtraX(el: Element | null, fallbackPadX: number): number {
+  if (!el) return fallbackPadX + 1;
+  const cs = window.getComputedStyle(el);
+  const pl = parseFloat(cs.paddingLeft) || 0;
+  const pr = parseFloat(cs.paddingRight) || 0;
+  const bl = parseFloat(cs.borderLeftWidth) || 0;
+  const br = parseFloat(cs.borderRightWidth) || 0;
+  return pl + pr + bl + br;
+}
+
+interface SmartIndexBudgetInput {
+  viewportWidth: number;
+  indexNaturalW: number;
+  otherNeededW: number;
+  maxColWidth: number;
+  wrap: TableOutputSettings['wrap'];
+  isSingleValueCol: boolean;
+}
+
+/**
+ * Computes the ideal width and max-width for the sticky index column.
+ * When the table has unused horizontal space, the index column is allowed to
+ * expand beyond the default column cap to show its full label instead of truncating.
+ * When space is tight, it stays bounded so data columns remain readable.
+ */
+function computeSmartIndexBudget({
+  viewportWidth,
+  indexNaturalW,
+  otherNeededW,
+  maxColWidth,
+  wrap,
+  isSingleValueCol,
+}: SmartIndexBudgetInput): { width: number; maxWidth: number } {
+  const minIndexW = 48;
+  const baseCap =
+    maxColWidth > 0
+      ? maxColWidth
+      : wrap === 'wrap'
+        ? 340
+        : 560;
+
+  if (viewportWidth <= 0) {
+    const maxWidth = Math.max(minIndexW, baseCap);
+    return {
+      width: Math.max(minIndexW, Math.min(indexNaturalW, maxWidth)),
+      maxWidth,
+    };
+  }
+
+  const tightCap = Math.min(
+    baseCap,
+    Math.max(80, Math.round(viewportWidth * 0.42))
+  );
+
+  const minDataReserve = isSingleValueCol
+    ? Math.min(110, Math.round(viewportWidth * 0.35))
+    : Math.min(160, Math.round(viewportWidth * 0.4));
+
+  const reservedForOthers = Math.max(minDataReserve, otherNeededW);
+  const spareForIndex = viewportWidth - reservedForOthers;
+
+  const maxAllowed = Math.max(
+    tightCap,
+    Math.min(viewportWidth - minDataReserve, spareForIndex)
+  );
+
+  return {
+    width: Math.max(minIndexW, Math.min(indexNaturalW, maxAllowed)),
+    maxWidth: Math.max(minIndexW, maxAllowed),
+  };
+}
+
+function measureDomNaturalColWidths(
+  table: HTMLTableElement,
+  rowOrigCells: WeakMap<HTMLTableRowElement, HTMLTableCellElement[]>,
+  totalCols: number,
+  settings: TableOutputSettings
+): number[] {
+  const widths = new Array<number>(totalCols).fill(48);
+  if (totalCols <= 0) return widths;
+
+  const fallbackPadX = getDensityPadX(settings.density);
+  const sampleHeader = table.tHead?.rows[0]?.cells[0] ?? null;
+  const sampleIndexCell = table.tBodies[0]?.querySelector('th') ?? null;
+  const sampleDataCell = table.tBodies[0]?.querySelector('td:not([data-sat-type="number"])') ??
+    table.tBodies[0]?.querySelector('td') ?? null;
+  const sampleNumCell = table.tBodies[0]?.querySelector('td[data-sat-type="number"]') ?? null;
+
+  const headerFont = readComputedFont(sampleHeader, settings.font_size, '600', UI_FONT_FAMILY);
+  const headerExtraX = readCellBoxExtraX(sampleHeader, fallbackPadX);
+  const indexFont = readComputedFont(
+    sampleIndexCell,
+    Math.round(settings.font_size * 0.92 * 10) / 10,
+    '500',
+    MONO_FONT_FAMILY
+  );
+  const indexExtraX = readCellBoxExtraX(sampleIndexCell, fallbackPadX);
+  const dataFont = readComputedFont(sampleDataCell, settings.font_size, '400', UI_FONT_FAMILY);
+  const dataExtraX = readCellBoxExtraX(sampleDataCell, fallbackPadX);
+  const numFont = sampleNumCell
+    ? readComputedFont(sampleNumCell, Math.round(settings.font_size * 0.94 * 10) / 10, '400', MONO_FONT_FAMILY)
+    : dataFont;
+
+  const safetyBuffer = 8;
+
+  if (table.tHead) {
+    for (const tr of Array.from(table.tHead.rows)) {
+      const origCells = rowOrigCells.get(tr) ?? Array.from(tr.cells);
+      if (origCells.length !== totalCols) continue;
+      for (let col = 0; col < totalCols; col++) {
+        const cell = origCells[col];
+        if (!cell) continue;
+        const txt = (cell.textContent || '').trim();
+        if (!txt) continue;
+        const sortExtra = cell.hasAttribute('data-sat-sortable-col') ? 16 : 0;
+        const w = Math.ceil(measureTextWidthPx(txt, headerFont) + headerExtraX + sortExtra + safetyBuffer);
+        if (w > widths[col]) widths[col] = w;
+      }
+    }
+  }
+
+  const tbody = table.tBodies[0];
+  if (tbody) {
+    const bodyRows = Array.from(tbody.rows);
+    const shouldSample = bodyRows.length > 160;
+    const topByCol: string[][] | null = shouldSample
+      ? Array.from({ length: totalCols }, () => [])
+      : null;
+
+    for (const tr of bodyRows) {
+      if (tr.getAttribute('data-sat-ellipsis-row') === 'true') continue;
+      const origCells = rowOrigCells.get(tr) ?? Array.from(tr.cells);
+      if (origCells.length !== totalCols) continue;
+      for (let col = 0; col < totalCols; col++) {
+        const cell = origCells[col];
+        if (!cell) continue;
+        const txt = (cell.textContent || '').trim();
+        if (!txt) continue;
+        if (topByCol) {
+          const bucket = topByCol[col];
+          if (bucket.length < 8) {
+            bucket.push(txt);
+          } else {
+            let minIdx = 0;
+            for (let k = 1; k < bucket.length; k++) {
+              if (bucket[k].length < bucket[minIdx].length) minIdx = k;
+            }
+            if (txt.length > bucket[minIdx].length) {
+              bucket[minIdx] = txt;
+            }
+          }
+        } else {
+          const isIdx = cell.tagName === 'TH';
+          const isNum = !isIdx && cell.getAttribute('data-sat-type') === 'number';
+          const font = isIdx ? indexFont : isNum ? numFont : dataFont;
+          const extraX = isIdx ? indexExtraX : dataExtraX;
+          let w = Math.ceil(measureTextWidthPx(txt, font) + extraX + safetyBuffer);
+          if (isIdx && cell.children.length > 0) {
+            w = Math.max(w, Math.ceil(cell.scrollWidth + 2));
+          }
+          if (w > widths[col]) widths[col] = w;
+        }
+      }
+    }
+
+    if (topByCol) {
+      for (let col = 0; col < totalCols; col++) {
+        const isIdx = col === 0;
+        const font = isIdx ? indexFont : dataFont;
+        const extraX = isIdx ? indexExtraX : dataExtraX;
+        for (const txt of topByCol[col]) {
+          const w = Math.ceil(measureTextWidthPx(txt, font) + extraX + safetyBuffer);
+          if (w > widths[col]) widths[col] = w;
+        }
+      }
+    }
+  }
+
+  return widths;
+}
 
 function estimateRowHeightPx(settings: TableOutputSettings): number {
   const lineH = Math.round(settings.font_size * 1.4);
@@ -186,6 +417,7 @@ const VirtualTableViewport: React.FC<
 
   const [scrollState, setScrollState] = useState({ left: false, right: false });
   const [viewportHeight, setViewportHeight] = useState(400);
+  const [viewportWidth, setViewportWidth] = useState(0);
   const [measuredRowH, setMeasuredRowH] = useState<number | null>(null);
   const [windowStart, setWindowStart] = useState(0);
 
@@ -202,6 +434,10 @@ const VirtualTableViewport: React.FC<
     tableRefOut.current = tableRef.current;
     if (viewportRefOut) viewportRefOut.current = viewportRef.current;
     if (scrollRefOut) scrollRefOut.current = scrollRef.current;
+    const cw = scrollRef.current?.clientWidth || 0;
+    if (cw > 0) {
+      setViewportWidth((prev) => (Math.abs(prev - cw) > 2 ? cw : prev));
+    }
     return () => {
       tableRefOut.current = null;
       if (viewportRefOut) viewportRefOut.current = null;
@@ -238,6 +474,10 @@ const VirtualTableViewport: React.FC<
     if (!el) return;
     const ch = el.clientHeight || 400;
     setViewportHeight((prev) => (Math.abs(prev - ch) > 4 ? ch : prev));
+    const cw = el.clientWidth || 0;
+    if (cw > 0) {
+      setViewportWidth((prev) => (Math.abs(prev - cw) > 2 ? cw : prev));
+    }
 
     const canLeft = el.scrollLeft > 2;
     const canRight = el.scrollLeft + el.clientWidth < el.scrollWidth - 2;
@@ -398,8 +638,60 @@ const VirtualTableViewport: React.FC<
     return () => ro.disconnect();
   }, [measureScrollAndWindow, settings]);
 
+  const naturalColWidths = useMemo(() => {
+    const total = virtualData.colEstimatedWidths.length;
+    const padX = getDensityPadX(settings.density) + 1;
+    const safetyBuffer = 8;
+    const headerFont = `600 ${settings.font_size}px ${UI_FONT_FAMILY}`;
+    const indexFont = `500 ${Math.round(settings.font_size * 0.92 * 10) / 10}px ${MONO_FONT_FAMILY}`;
+    const dataFont = `400 ${settings.font_size}px ${UI_FONT_FAMILY}`;
+    const numFont = settings.highlight_types
+      ? `400 ${Math.round(settings.font_size * 0.94 * 10) / 10}px ${MONO_FONT_FAMILY}`
+      : dataFont;
+
+    const result = new Array<number>(total);
+    for (let col = 0; col < total; col++) {
+      const isIdx = Boolean(meta.columns[col]?.isIndex);
+      let w = isIdx ? 48 : 68;
+
+      for (const hRow of virtualData.headerTextRows) {
+        const hTxt = (hRow[col] || '').trim();
+        if (!hTxt) continue;
+        const sortExtra = meta.canSort ? 16 : 0;
+        const hw = Math.ceil(measureTextWidthPx(hTxt, headerFont) + padX + sortExtra + safetyBuffer);
+        if (hw > w) w = hw;
+      }
+
+      const longestBody = virtualData.longestCellPerCol?.[col] || '';
+      if (longestBody) {
+        const bodyFont = isIdx
+          ? indexFont
+          : virtualData.colTypes[col] === 'number'
+            ? numFont
+            : dataFont;
+        const bw = Math.ceil(measureTextWidthPx(longestBody, bodyFont) + padX + safetyBuffer);
+        if (bw > w) w = bw;
+      } else {
+        w = Math.max(w, virtualData.colEstimatedWidths[col] || w);
+      }
+
+      result[col] = w;
+    }
+    return result;
+  }, [
+    virtualData.colEstimatedWidths,
+    virtualData.longestCellPerCol,
+    virtualData.headerTextRows,
+    virtualData.colTypes,
+    meta.columns,
+    meta.canSort,
+    settings.font_size,
+    settings.density,
+    settings.highlight_types,
+  ]);
+
   // Column widths & table total width for rock-solid horizontal stability during scroll
-  const { effectiveColWidths, totalTableWidth } = useMemo(() => {
+  const { effectiveColWidths, totalTableWidth, indexBudget } = useMemo(() => {
     const globalCap =
       settings.max_col_width > 0
         ? settings.max_col_width
@@ -407,16 +699,58 @@ const VirtualTableViewport: React.FC<
           ? 340
           : 560;
     const widths: Record<number, number> = {};
-    let sum = 0;
+    const indexCol = meta.canStickyIndex && !hiddenSet.has(0) ? 0 : -1;
+    const isSingleValueCol = indexCol !== -1 && visibleCols.length === 2;
+    let otherBaseSum = 0;
+    let otherNeededW = 0;
+
     for (const c of visibleCols) {
+      if (c === indexCol) continue;
       const custom = colWidths[c];
-      const est = virtualData.colEstimatedWidths[c] || 96;
-      const w = custom && custom > 0 ? custom : Math.min(globalCap, est);
+      const nat = naturalColWidths[c] || virtualData.colEstimatedWidths[c] || 96;
+      const w = custom && custom > 0 ? custom : Math.min(globalCap, nat);
       widths[c] = w;
-      sum += w;
+      otherBaseSum += w;
+      otherNeededW += custom && custom > 0 ? custom : isSingleValueCol ? nat + 16 : w;
     }
-    return { effectiveColWidths: widths, totalTableWidth: Math.max(120, sum) };
-  }, [visibleCols, colWidths, virtualData.colEstimatedWidths, settings.max_col_width, settings.wrap]);
+
+    let budget: { width: number; maxWidth: number } | null = null;
+    let indexW = 0;
+    if (indexCol !== -1) {
+      const customIdx = colWidths[indexCol];
+      if (customIdx && customIdx > 0) {
+        indexW = customIdx;
+      } else {
+        const indexNaturalW = naturalColWidths[indexCol] || virtualData.colEstimatedWidths[indexCol] || 54;
+        budget = computeSmartIndexBudget({
+          viewportWidth,
+          indexNaturalW,
+          otherNeededW,
+          maxColWidth: settings.max_col_width,
+          wrap: settings.wrap,
+          isSingleValueCol,
+        });
+        indexW = budget.width;
+      }
+      widths[indexCol] = indexW;
+    }
+
+    return {
+      effectiveColWidths: widths,
+      totalTableWidth: Math.max(120, otherBaseSum + indexW),
+      indexBudget: budget,
+    };
+  }, [
+    visibleCols,
+    hiddenSet,
+    colWidths,
+    naturalColWidths,
+    virtualData.colEstimatedWidths,
+    meta.canStickyIndex,
+    viewportWidth,
+    settings.max_col_width,
+    settings.wrap,
+  ]);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -584,7 +918,7 @@ const VirtualTableViewport: React.FC<
     : settings.height === 'full'
       ? '76vh'
       : outputLimited
-        ? '210px'
+        ? 'max(60px, calc(var(--sat-output-height, 256px) - 46px))'
         : '400px';
 
   const maxColW =
@@ -594,6 +928,7 @@ const VirtualTableViewport: React.FC<
         ? '340px'
         : 'none';
 
+  const flexCols = Math.max(1, visibleCols.filter(c => !colWidths[c] && !meta.columns[c]?.isIndex).length);
   const topPadHalf1 = Math.floor(topPad / 2);
   const topPadHalf2 = topPad - topPadHalf1;
 
@@ -609,9 +944,16 @@ const VirtualTableViewport: React.FC<
       data-sticky={String(settings.sticky_headers)}
       data-highlight={String(settings.highlight_types)}
       data-grid={String(settings.show_grid)}
+      data-virtual="true"
       style={{
         ['--sat-table-font-size' as any]: `${settings.font_size}px`,
         ['--sat-table-max-col-w' as any]: maxColW,
+        ...(indexBudget
+          ? {
+              ['--sat-index-col-w' as any]: `${indexBudget.width}px`,
+              ['--sat-index-max-w' as any]: `${indexBudget.maxWidth}px`,
+            }
+          : {}),
       }}
     >
       <div
@@ -647,8 +989,11 @@ const VirtualTableViewport: React.FC<
               {visibleCols.map((colIdx) => (
                 <col
                   key={colIdx}
+                  data-sat-index-col={meta.columns[colIdx]?.isIndex || undefined}
                   style={{
-                    width: `${effectiveColWidths[colIdx]}px`,
+                    width: colWidths[colIdx] || meta.columns[colIdx]?.isIndex
+                      ? `${effectiveColWidths[colIdx]}px`
+                      : `max(${effectiveColWidths[colIdx]}px, calc(${effectiveColWidths[colIdx]}px + (100cqw - ${totalTableWidth}px) / ${flexCols}))`,
                   }}
                 />
               ))}
@@ -676,7 +1021,9 @@ const VirtualTableViewport: React.FC<
                     className={vRow.rowClass}
                     data-sat-ellipsis-row={isEllipsis ? 'true' : undefined}
                     ref={(el) => {
-                      if (el && vRow.rowStyle) el.setAttribute('style', vRow.rowStyle);
+                      if (!el) return;
+                      if (vRow.rowStyle) el.setAttribute('style', vRow.rowStyle);
+                      else if (el.hasAttribute('style')) el.removeAttribute('style');
                     }}
                   >
                     {visibleCols.map((colIdx) => {
@@ -707,7 +1054,15 @@ const VirtualTableViewport: React.FC<
                           data-sat-sticky-index={isStickyNow ? 'true' : undefined}
                           data-sat-ellipsis-col={isEllipsisCol ? 'true' : undefined}
                           ref={(el) => {
-                            if (el && cs?.style) el.setAttribute('style', cs.style);
+                            if (!el) return;
+                            if (cs?.style) {
+                              el.setAttribute('style', cs.style);
+                            } else {
+                              if (el.hasAttribute('style')) el.removeAttribute('style');
+                              if (el.hasAttribute('data-sat-auto-contrast')) {
+                                el.removeAttribute('data-sat-auto-contrast');
+                              }
+                            }
                           }}
                         >
                           {txt}
@@ -768,10 +1123,16 @@ const DomTableViewport: React.FC<TableViewportProps> = React.memo(({
   const hadSortAppliedRef = useRef(false);
   const suppressNextSortClickRef = useRef(false);
   const [scrollState, setScrollState] = useState({ left: false, right: false });
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const [naturalColWidths, setNaturalColWidths] = useState<number[] | null>(null);
 
   useLayoutEffect(() => {
     if (viewportRefOut) viewportRefOut.current = viewportRef.current;
     if (scrollRefOut) scrollRefOut.current = scrollRef.current;
+    const cw = scrollRef.current?.clientWidth || 0;
+    if (cw > 0) {
+      setViewportWidth((prev) => (Math.abs(prev - cw) > 2 ? cw : prev));
+    }
     return () => {
       if (viewportRefOut) viewportRefOut.current = null;
       if (scrollRefOut) scrollRefOut.current = null;
@@ -781,6 +1142,10 @@ const DomTableViewport: React.FC<TableViewportProps> = React.memo(({
   const measureScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    const cw = el.clientWidth || 0;
+    if (cw > 0) {
+      setViewportWidth((prev) => (Math.abs(prev - cw) > 2 ? cw : prev));
+    }
     const canLeft = el.scrollLeft > 2;
     const canRight = el.scrollLeft + el.clientWidth < el.scrollWidth - 2;
     setScrollState((prev) =>
@@ -846,6 +1211,90 @@ const DomTableViewport: React.FC<TableViewportProps> = React.memo(({
       host.innerHTML = '';
     };
   }, [tableHtml, preservedStylesHtml, meta.hasCustomStyles, tableRefOut, measureScroll]);
+
+  // Measure natural column widths so the index column can use available horizontal space cleanly
+  useLayoutEffect(() => {
+    if (!meta.canStickyIndex || meta.totalCols <= 0) {
+      setNaturalColWidths((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const table = hostRef.current?.querySelector('table') as HTMLTableElement | null;
+    if (!table) return;
+    const cw = scrollRef.current?.clientWidth || 0;
+    if (cw > 0) {
+      setViewportWidth((prev) => (Math.abs(prev - cw) > 2 ? cw : prev));
+    }
+    const nextWidths = measureDomNaturalColWidths(
+      table,
+      rowOrigCellsRef.current,
+      meta.totalCols,
+      settings
+    );
+    setNaturalColWidths((prev) => {
+      if (
+        prev &&
+        prev.length === nextWidths.length &&
+        prev.every((v, idx) => v === nextWidths[idx])
+      ) {
+        return prev;
+      }
+      return nextWidths;
+    });
+  }, [
+    tableHtml,
+    preservedStylesHtml,
+    meta.canStickyIndex,
+    meta.totalCols,
+    settings.font_size,
+    settings.density,
+    settings.highlight_types,
+  ]);
+
+  const indexBudget = useMemo(() => {
+    if (!meta.canStickyIndex || !naturalColWidths) return null;
+    const hiddenSet = new Set(hiddenCols);
+    if (hiddenSet.has(0) || (colWidths[0] && colWidths[0] > 0)) return null;
+
+    const visibleCols = colOrder.filter((c) => !hiddenSet.has(c));
+    const isSingleValueCol = visibleCols.length === 2;
+    const globalCap =
+      settings.max_col_width > 0
+        ? settings.max_col_width
+        : settings.wrap === 'wrap'
+          ? 340
+          : 560;
+
+    let otherNeededW = 0;
+    for (const c of visibleCols) {
+      if (c === 0) continue;
+      const custom = colWidths[c];
+      const nat = naturalColWidths[c] || 96;
+      otherNeededW +=
+        custom && custom > 0
+          ? custom
+          : isSingleValueCol
+            ? nat + 16
+            : Math.min(globalCap, nat);
+    }
+
+    return computeSmartIndexBudget({
+      viewportWidth,
+      indexNaturalW: naturalColWidths[0] || 54,
+      otherNeededW,
+      maxColWidth: settings.max_col_width,
+      wrap: settings.wrap,
+      isSingleValueCol,
+    });
+  }, [
+    meta.canStickyIndex,
+    naturalColWidths,
+    hiddenCols,
+    colWidths,
+    colOrder,
+    viewportWidth,
+    settings.max_col_width,
+    settings.wrap,
+  ]);
 
   // Apply column order, custom column widths, and hidden columns to DOM
   useLayoutEffect(() => {
@@ -1198,7 +1647,7 @@ const DomTableViewport: React.FC<TableViewportProps> = React.memo(({
     : settings.height === 'full'
       ? 'none'
       : outputLimited
-        ? '210px'
+        ? 'max(60px, calc(var(--sat-output-height, 256px) - 46px))'
         : '400px';
 
   const maxColW =
@@ -1223,6 +1672,12 @@ const DomTableViewport: React.FC<TableViewportProps> = React.memo(({
       style={{
         ['--sat-table-font-size' as any]: `${settings.font_size}px`,
         ['--sat-table-max-col-w' as any]: maxColW,
+        ...(indexBudget
+          ? {
+              ['--sat-index-col-w' as any]: `${indexBudget.width}px`,
+              ['--sat-index-max-w' as any]: `${indexBudget.maxWidth}px`,
+            }
+          : {}),
       }}
     >
       <div
@@ -1251,19 +1706,6 @@ const DomTableViewport: React.FC<TableViewportProps> = React.memo(({
 });
 
 const TableViewport: React.FC<TableViewportProps> = React.memo((props) => {
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const hoveredTdRef = useRef<HTMLTableCellElement | null>(null);
-  const [hoverBtn, setHoverBtn] = useState<{
-    top: number;
-    left: number;
-    colIndex: number;
-    colLabel: string;
-    rowLabel: string;
-    text: string;
-    isPandasCut: boolean;
-    isExpandedInline: boolean;
-  } | null>(null);
-
   const inspectTd = useCallback(
     (td: HTMLTableCellElement) => {
       const txt = (td.textContent || '').trim();
@@ -1288,63 +1730,7 @@ const TableViewport: React.FC<TableViewportProps> = React.memo((props) => {
     [props.meta.columns]
   );
 
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      const target = e.target as HTMLElement;
-      if (target.closest('[data-sat-cell-expand-trigger="true"]')) return;
-      const td = target.closest('tbody td') as HTMLTableCellElement | null;
-      if (!td || td.parentElement?.getAttribute('data-sat-spacer') === 'true') {
-        if (hoverBtn) setHoverBtn(null);
-        hoveredTdRef.current = null;
-        return;
-      }
-      const txt = (td.textContent || '').trim();
-      if (!txt || isEllipsisToken(txt)) {
-        if (hoverBtn) setHoverBtn(null);
-        hoveredTdRef.current = null;
-        return;
-      }
-      const isPandasCut = txt.endsWith('...') || txt.endsWith('…');
-      const isOverflowing =
-        td.scrollWidth > td.clientWidth + 1 || td.scrollHeight > td.clientHeight + 1;
-      const isLongText = txt.length > 36 || txt.includes('\n');
-      const isExpandedInline = td.hasAttribute('data-sat-cell-expanded');
-
-      if (!isOverflowing && !isPandasCut && !isLongText && !isExpandedInline) {
-        if (hoverBtn) setHoverBtn(null);
-        hoveredTdRef.current = null;
-        return;
-      }
-
-      const wrapEl = wrapRef.current;
-      if (!wrapEl) return;
-      const wrapRect = wrapEl.getBoundingClientRect();
-      const tdRect = td.getBoundingClientRect();
-      const top = Math.max(2, Math.round(tdRect.top - wrapRect.top + 2));
-      const left = Math.max(
-        4,
-        Math.min(wrapRect.width - 68, Math.round(tdRect.right - wrapRect.left - 64))
-      );
-
-      hoveredTdRef.current = td;
-      const info = inspectTd(td);
-      if (!info) return;
-      setHoverBtn({
-        top,
-        left,
-        ...info,
-        isExpandedInline,
-      });
-    },
-    [hoverBtn, inspectTd]
-  );
-
-  const handleMouseLeave = useCallback(() => {
-    setHoverBtn(null);
-    hoveredTdRef.current = null;
-  }, []);
-
-  const handleDoubleClickCapture = useCallback(
+  const handleCellClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target as HTMLElement;
       if (target.closest('.sat-col-resize-handle')) return;
@@ -1352,42 +1738,17 @@ const TableViewport: React.FC<TableViewportProps> = React.memo((props) => {
       if (!td || td.parentElement?.getAttribute('data-sat-spacer') === 'true') return;
       const info = inspectTd(td);
       if (!info || !info.text) return;
-      td.toggleAttribute('data-sat-cell-expanded');
       props.onInspectCell?.(info);
     },
     [inspectTd, props.onInspectCell]
   );
 
-  const handleTriggerExpand = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (!hoverBtn) return;
-      const td = hoveredTdRef.current;
-      if (td) {
-        td.toggleAttribute('data-sat-cell-expanded');
-        setHoverBtn((prev) =>
-          prev ? { ...prev, isExpandedInline: td.hasAttribute('data-sat-cell-expanded') } : null
-        );
-      }
-      props.onInspectCell?.({
-        colIndex: hoverBtn.colIndex,
-        colLabel: hoverBtn.colLabel,
-        rowLabel: hoverBtn.rowLabel,
-        text: hoverBtn.text,
-        isPandasCut: hoverBtn.isPandasCut,
-      });
-    },
-    [hoverBtn, props.onInspectCell]
-  );
-
   return (
     <div
-      ref={wrapRef}
-      onMouseMove={handleMouseMove}
-      onMouseLeave={handleMouseLeave}
-      onDoubleClickCapture={handleDoubleClickCapture}
-      className={`relative min-w-0 ${props.isFullscreen ? 'flex-1 min-h-0 flex flex-col' : ''}`}
+      data-fit-value-column={props.meta.canStickyIndex && props.meta.totalCols === 2 &&
+        !props.hiddenCols.length && !Object.keys(props.colWidths).length || undefined}
+      onClick={handleCellClick}
+      className={`relative isolate min-w-0 ${props.isFullscreen ? 'flex-1 min-h-0 flex flex-col' : ''}`}
     >
       {props.virtualData && props.activeVirtualRows ? (
         <VirtualTableViewport
@@ -1415,26 +1776,6 @@ const TableViewport: React.FC<TableViewportProps> = React.memo((props) => {
         <DomTableViewport {...props} />
       )}
 
-      {hoverBtn && (
-        <button
-          type="button"
-          data-sat-cell-expand-trigger="true"
-          onClick={handleTriggerExpand}
-          style={{
-            top: `${hoverBtn.top}px`,
-            left: `${hoverBtn.left}px`,
-            backgroundColor: 'var(--sat-bg-surface)',
-            borderColor: 'var(--sat-border-strong)',
-            color: 'var(--sat-text-primary)',
-          }}
-          title="Expandir campo para ver descrição inteira (ou duplo-clique na célula)"
-          aria-label="Expandir campo"
-          className="absolute z-30 h-5 px-1.5 rounded-[3px] border shadow-md text-[10px] font-medium inline-flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer transition-colors"
-        >
-          <Maximize2 size={9.5} style={{ color: 'var(--sat-accent)' }} />
-          <span>Expandir</span>
-        </button>
-      )}
     </div>
   );
 });
@@ -1478,7 +1819,7 @@ const TableExportPopover: React.FC<ExportPopoverProps> = ({
   useLayoutEffect(() => {
     const updatePos = () => {
       const rect = anchorEl.getBoundingClientRect();
-      const popW = 280;
+      const popW = Math.min(280, window.innerWidth - 16);
       const popH = popRef.current?.offsetHeight || 290;
       let left = rect.right - popW;
       left = Math.max(8, Math.min(window.innerWidth - popW - 8, left));
@@ -1528,7 +1869,7 @@ const TableExportPopover: React.FC<ExportPopoverProps> = ({
       data-modal-root="true"
       data-table-export-popover="true"
       onClick={(e) => e.stopPropagation()}
-      className="fixed z-[125] w-[280px] rounded-[4px] border shadow-2xl p-3 space-y-2.5 text-xs select-none"
+      className="fixed z-[125] w-[280px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto rounded-[4px] border shadow-2xl p-3 space-y-2.5 text-xs select-none"
       style={{
         top: pos.top,
         left: pos.left,
@@ -1714,7 +2055,7 @@ const TableConfigPopover: React.FC<ConfigPopoverProps> = ({
   useLayoutEffect(() => {
     const updatePos = () => {
       const rect = anchorEl.getBoundingClientRect();
-      const popW = 296;
+      const popW = Math.min(296, window.innerWidth - 16);
       const popH = popRef.current?.offsetHeight || 420;
       let left = rect.right - popW;
       left = Math.max(8, Math.min(window.innerWidth - popW - 8, left));
@@ -1780,7 +2121,7 @@ const TableConfigPopover: React.FC<ConfigPopoverProps> = ({
       data-modal-root="true"
       data-table-popover="true"
       onClick={(e) => e.stopPropagation()}
-      className="fixed z-[120] w-[296px] max-h-[calc(100vh-16px)] overflow-y-auto rounded-[4px] border shadow-2xl p-3 space-y-2.5 text-xs select-none"
+      className="fixed z-[120] w-[296px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto rounded-[4px] border shadow-2xl p-3 space-y-2.5 text-xs select-none"
       style={{
         top: pos.top,
         left: pos.left,
@@ -1874,7 +2215,7 @@ const TableConfigPopover: React.FC<ConfigPopoverProps> = ({
             <button
               type="button"
               onClick={() => setShowColList((v) => !v)}
-              className="inline-flex items-center gap-1.5 text-[11.5px] font-medium hover: opacity-90 cursor-pointer"
+              className="inline-flex items-center gap-1.5 text-[11.5px] font-medium hover:opacity-90 cursor-pointer"
               style={{ color: 'var(--sat-text-primary)' }}
             >
               <Columns3 size={12} style={{ color: 'var(--sat-accent)' }} />
@@ -2049,6 +2390,7 @@ const TableConfigPopover: React.FC<ConfigPopoverProps> = ({
 };
 
 interface InteractiveTableCardProps {
+  formatAction?: React.ReactNode;
   tableHtml: string;
   virtualData?: VirtualTableData;
   meta: TableMeta;
@@ -2060,6 +2402,7 @@ interface InteractiveTableCardProps {
 }
 
 const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
+  formatAction,
   tableHtml,
   virtualData,
   meta,
@@ -2103,7 +2446,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
   const [copiedCellText, setCopiedCellText] = useState(false);
 
   useEffect(() => {
-    if (!inspectedCell) return;
+    if (!inspectedCell?.isPandasCut || !isExpandedTruncated || !inspectedCell.rowLabel) return;
     if (virtualData) {
       const matchRow = virtualData.rows.find((r) => r.cells[0] === inspectedCell.rowLabel);
       const nextTxt = matchRow?.cells[inspectedCell.colIndex];
@@ -2134,7 +2477,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
       }
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [tableHtml, virtualData, inspectedCell]);
+  }, [tableHtml, virtualData, inspectedCell, isExpandedTruncated]);
 
   const hasTruncatedFields = useMemo(() => {
     if (meta.isTruncated) return true;
@@ -2219,7 +2562,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
       if (!Number.isNaN(a.key.num) && !Number.isNaN(b.key.num)) {
         cmp = a.key.num - b.key.num;
       } else {
-        cmp = a.key.str.localeCompare(b.key.str, 'pt-BR', { numeric: true, sensitivity: 'base' });
+        cmp = PT_BR_COLLATOR.compare(a.key.str, b.key.str);
       }
       if (cmp === 0) return a.idx - b.idx;
       return sortState.dir === 'asc' ? cmp : -cmp;
@@ -2456,6 +2799,13 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
     window.setTimeout(() => setSavedDefaultToast(false), 1500);
   }, [effectiveSettings, setGlobalSettings]);
 
+  const handleInspectCell = useCallback((info: InspectedCellData) => {
+    setInspectedCell(info);
+    if (info.isPandasCut && onExpandTruncated && !isExpandedTruncated) {
+      onExpandTruncated();
+    }
+  }, [onExpandTruncated, isExpandedTruncated]);
+
   // Modal corner resize handler so user can freely resize the popup window
   const handleModalResizePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !modalBoxRef.current) return;
@@ -2496,6 +2846,106 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
   const toolbarBtnClass =
     'h-5.5 min-w-[22px] px-1.5 rounded-[3px] inline-flex items-center justify-center gap-1 text-[11px] transition-colors cursor-pointer hover:bg-[var(--sat-bg-hover)]';
 
+  const fieldInspector = inspectedCell && (
+        <div
+          data-sat-field-inspector="true"
+          className="px-3 py-2.5 border-t space-y-1.5 text-xs"
+          style={{
+            backgroundColor: 'var(--sat-bg-surface)',
+            borderColor: 'var(--sat-border)',
+            color: 'var(--sat-text-primary)',
+          }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-semibold text-[11.5px] truncate">
+                Campo: {inspectedCell.colLabel}
+              </span>
+              {inspectedCell.rowLabel && (
+                <span
+                  className="font-mono text-[10.5px] px-1.5 py-0.5 rounded-[2px]"
+                  style={{
+                    backgroundColor: 'var(--sat-bg-subtle)',
+                    color: 'var(--sat-text-secondary)',
+                  }}
+                >
+                  Linha {inspectedCell.rowLabel}
+                </span>
+              )}
+              <span
+                className="font-mono text-[10.5px]"
+                style={{ color: 'var(--sat-text-muted)' }}
+              >
+                {inspectedCell.text.length} caracteres
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {inspectedCell.isPandasCut && onExpandTruncated && !isExpandedTruncated && (
+                <button
+                  type="button"
+                  onClick={onExpandTruncated}
+                  disabled={isExpandingTruncated}
+                  className="h-6 px-2 rounded-[3px] border text-[11px] font-medium inline-flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer"
+                  style={{
+                    backgroundColor: 'var(--sat-accent-soft)',
+                    borderColor: 'var(--sat-accent)',
+                    color: 'var(--sat-accent)',
+                  }}
+                >
+                  {isExpandingTruncated ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <ChevronsLeftRight size={11} />
+                  )}
+                  <span>Ver texto sem corte (...)</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const ok = await copyTextToClipboard(inspectedCell.text);
+                  if (ok) {
+                    setCopiedCellText(true);
+                    window.setTimeout(() => setCopiedCellText(false), 1500);
+                  }
+                }}
+                className="h-6 px-2 rounded-[3px] border text-[11px] inline-flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer"
+                style={{
+                  backgroundColor: 'var(--sat-bg-subtle)',
+                  borderColor: 'var(--sat-border)',
+                  color: copiedCellText ? 'var(--sat-green)' : 'var(--sat-text-secondary)',
+                }}
+              >
+                {copiedCellText ? <Check size={11} /> : <Copy size={11} />}
+                <span>{copiedCellText ? 'Copiado' : 'Copiar'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setInspectedCell(null)}
+                className="sat-icon-btn p-1"
+                title="Fechar visualização do campo"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          </div>
+
+          <pre
+            className="m-0 p-2.5 rounded-[3px] border font-mono text-xs leading-relaxed whitespace-pre-wrap break-words max-h-48 overflow-y-auto select-text"
+            style={{
+              backgroundColor: 'var(--sat-bg-canvas)',
+              borderColor: 'var(--sat-border-subtle)',
+              color: 'var(--sat-text-primary)',
+            }}
+          >
+            {inspectedCell.text}
+          </pre>
+        </div>
+      );
+
   return (
     <div
       className="sat-table-card w-full min-w-0 rounded-[4px] border overflow-hidden"
@@ -2506,7 +2956,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
     >
       {/* Compact Header & Corner Controls */}
       <div
-        className="h-7 px-2 flex items-center justify-between gap-2 border-b select-none"
+        className="h-7 px-2 flex items-center justify-between gap-2 border-b select-none overflow-x-auto overflow-y-hidden no-scrollbar"
         style={{
           backgroundColor: 'var(--sat-bg-surface)',
           borderColor: 'var(--sat-border)',
@@ -2572,6 +3022,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
         </div>
 
         <div className="flex items-center gap-0.5 shrink-0">
+          {formatAction}
           {!meta.hasRowSpanInBody && (
             filterOpen ? (
               <div
@@ -2597,7 +3048,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
                     }
                   }}
                   placeholder="Filtrar linhas..."
-                  className="w-28 sm:w-36 bg-transparent text-[11px] outline-none"
+                  className="w-24 sm:w-36 bg-transparent text-[11px] outline-none"
                   style={{ color: 'var(--sat-text-primary)' }}
                 />
                 <button
@@ -2661,31 +3112,15 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
             <button
               type="button"
               disabled={isExpandingTruncated}
-              onClick={() => {
-                const isAllFieldsExpanded =
-                  effectiveSettings.wrap === 'wrap' && effectiveSettings.max_col_width === 0;
-                if (isAllFieldsExpanded && !isExpandedTruncated) {
-                  updateLocal({
-                    wrap: 'nowrap',
-                    max_col_width: globalSettings.max_col_width || 280,
-                  });
-                } else {
-                  updateLocal({ wrap: 'wrap', max_col_width: 0 });
-                  if (onExpandTruncated && (!isExpandedTruncated || meta.isTruncated)) {
-                    onExpandTruncated();
-                  }
-                }
-              }}
+              onClick={onExpandTruncated}
               className={toolbarBtnClass}
               style={{
                 backgroundColor:
-                  isExpandedTruncated ||
-                  (effectiveSettings.wrap === 'wrap' && effectiveSettings.max_col_width === 0)
+                  isExpandedTruncated
                     ? 'var(--sat-accent-soft)'
                     : undefined,
                 color:
-                  isExpandedTruncated ||
-                  (effectiveSettings.wrap === 'wrap' && effectiveSettings.max_col_width === 0)
+                  isExpandedTruncated
                     ? 'var(--sat-accent)'
                     : 'var(--sat-text-muted)',
               }}
@@ -2698,8 +3133,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
                 <ChevronsLeftRight size={12.5} />
               )}
               <span className="hidden md:inline text-[10.5px]">
-                {isExpandedTruncated ||
-                (effectiveSettings.wrap === 'wrap' && effectiveSettings.max_col_width === 0)
+                {isExpandedTruncated
                   ? 'Recolher (...)'
                   : 'Expandir (...)'}
               </span>
@@ -2833,113 +3267,10 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
         viewportRefOut={viewportRef}
         scrollRefOut={scrollRef}
         outputLimited={outputLimited}
-        onInspectCell={(info) => {
-          setInspectedCell(info);
-          if (info.isPandasCut && onExpandTruncated && !isExpandedTruncated) {
-            onExpandTruncated();
-          }
-        }}
+        onInspectCell={handleInspectCell}
       />
 
-      {inspectedCell && (
-        <div
-          data-sat-field-inspector="true"
-          className="px-3 py-2.5 border-t space-y-1.5 text-xs"
-          style={{
-            backgroundColor: 'var(--sat-bg-surface)',
-            borderColor: 'var(--sat-border)',
-            color: 'var(--sat-text-primary)',
-          }}
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="font-semibold text-[11.5px] truncate">
-                Campo: {inspectedCell.colLabel}
-              </span>
-              {inspectedCell.rowLabel && (
-                <span
-                  className="font-mono text-[10.5px] px-1.5 py-0.5 rounded-[2px]"
-                  style={{
-                    backgroundColor: 'var(--sat-bg-subtle)',
-                    color: 'var(--sat-text-secondary)',
-                  }}
-                >
-                  Linha {inspectedCell.rowLabel}
-                </span>
-              )}
-              <span
-                className="font-mono text-[10.5px]"
-                style={{ color: 'var(--sat-text-muted)' }}
-              >
-                {inspectedCell.text.length} caracteres
-              </span>
-            </div>
-
-            <div className="flex items-center gap-1.5 shrink-0">
-              {inspectedCell.isPandasCut && onExpandTruncated && !isExpandedTruncated && (
-                <button
-                  type="button"
-                  onClick={onExpandTruncated}
-                  disabled={isExpandingTruncated}
-                  className="h-6 px-2 rounded-[3px] border text-[11px] font-medium inline-flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer"
-                  style={{
-                    backgroundColor: 'var(--sat-accent-soft)',
-                    borderColor: 'var(--sat-accent)',
-                    color: 'var(--sat-accent)',
-                  }}
-                >
-                  {isExpandingTruncated ? (
-                    <Loader2 size={11} className="animate-spin" />
-                  ) : (
-                    <ChevronsLeftRight size={11} />
-                  )}
-                  <span>Ver texto sem corte (...)</span>
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={async () => {
-                  const ok = await copyTextToClipboard(inspectedCell.text);
-                  if (ok) {
-                    setCopiedCellText(true);
-                    window.setTimeout(() => setCopiedCellText(false), 1500);
-                  }
-                }}
-                className="h-6 px-2 rounded-[3px] border text-[11px] inline-flex items-center gap-1 hover:bg-[var(--sat-bg-hover)] cursor-pointer"
-                style={{
-                  backgroundColor: 'var(--sat-bg-subtle)',
-                  borderColor: 'var(--sat-border)',
-                  color: copiedCellText ? 'var(--sat-green)' : 'var(--sat-text-secondary)',
-                }}
-              >
-                {copiedCellText ? <Check size={11} /> : <Copy size={11} />}
-                <span>{copiedCellText ? 'Copiado' : 'Copiar'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setInspectedCell(null)}
-                className="sat-icon-btn p-1"
-                title="Fechar visualização do campo"
-              >
-                <X size={13} />
-              </button>
-            </div>
-          </div>
-
-          <pre
-            className="m-0 p-2.5 rounded-[3px] border font-mono text-xs leading-relaxed whitespace-pre-wrap break-words max-h-48 overflow-y-auto select-text"
-            style={{
-              backgroundColor: 'var(--sat-bg-canvas)',
-              borderColor: 'var(--sat-border-subtle)',
-              color: 'var(--sat-text-primary)',
-            }}
-          >
-            {inspectedCell.text}
-          </pre>
-        </div>
-      )}
+      {!isFullscreen && fieldInspector}
 
       {hasFilter && visibleCount === 0 && (
         <div
@@ -3027,13 +3358,13 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
               }}
             >
               <div
-                className="h-10 px-3 flex items-center justify-between gap-3 border-b shrink-0 select-none"
+                className="h-10 px-3 flex items-center justify-between gap-2 sm:gap-3 border-b shrink-0 select-none overflow-x-auto overflow-y-hidden no-scrollbar"
                 style={{
                   backgroundColor: 'var(--sat-bg-surface)',
                   borderColor: 'var(--sat-border)',
                 }}
               >
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2 min-w-0 shrink-0">
                   <Table2 size={14} style={{ color: 'var(--sat-accent)' }} />
                   <span className="font-semibold text-xs">Tabela</span>
                   <span
@@ -3070,7 +3401,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
                   )}
                 </div>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 shrink-0">
                   {!meta.hasRowSpanInBody && (
                     <div
                       className="flex items-center h-6.5 px-2 rounded-[3px] border gap-1.5"
@@ -3086,7 +3417,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
                         value={filterQuery}
                         onChange={(e) => setFilterQuery(e.target.value)}
                         placeholder="Filtrar linhas..."
-                        className="w-36 sm:w-48 bg-transparent text-xs outline-none"
+                        className="w-24 sm:w-44 bg-transparent text-xs outline-none"
                         style={{ color: 'var(--sat-text-primary)' }}
                       />
                       {hasFilter && (
@@ -3233,9 +3564,12 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
                 tableRefOut={fullscreenTableRef}
                 viewportRefOut={fullscreenViewportRef}
                 scrollRefOut={fullscreenScrollRef}
+                onInspectCell={handleInspectCell}
                 isFullscreen
                 modalExpanded={modalExpanded}
               />
+
+              {fieldInspector}
 
               {/* Corner resize grip for manual modal sizing */}
               <div
@@ -3262,6 +3596,7 @@ const InteractiveTableCard: React.FC<InteractiveTableCardProps> = React.memo(({
 export const TableOutputView: React.FC<Props> = React.memo(
   ({
     rawHtml,
+    formatAction,
     outputLimited = false,
     onExpandTruncated,
     isExpandingTruncated = false,
@@ -3284,6 +3619,7 @@ export const TableOutputView: React.FC<Props> = React.memo(
           block.type === 'table' ? (
             <InteractiveTableCard
               key={idx}
+              formatAction={formatAction}
               tableHtml={block.tableHtml}
               virtualData={block.virtualData}
               meta={block.meta}

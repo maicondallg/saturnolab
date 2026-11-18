@@ -13,16 +13,15 @@ from typing import Any, Awaitable, Callable
 
 from jupyter_client.manager import AsyncKernelManager
 
+from . import fs_service
+
 _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 KERNEL_INIT_TEMPLATE = r"""
 {extra_site_setup}
 import os as _sat_os
 _sat_os.environ.setdefault("PLOTLY_RENDERER", "plotly_mimetype")
-try:
-    get_ipython().run_line_magic('matplotlib', 'inline')
-except Exception:
-    pass
+_sat_os.environ.setdefault("MPLBACKEND", "module://matplotlib_inline.backend_inline")
 
 def __saturno_configure_display_libs__():
     import sys as _sys
@@ -102,18 +101,58 @@ def __saturno_expand_output__(_exec_count=None, _expr_code=""):
         "text/plain": _text,
     }}, ensure_ascii=False)
 
+import datetime as _sat_dt
+import decimal as _sat_dec
+import pathlib as _sat_plib
+import re as _sat_re
+import reprlib as _sat_reprlib
+import uuid as _sat_uuid
+
+_SAT_SAFE_STR_TYPES = (
+    _sat_dt.date,
+    _sat_dt.time,
+    _sat_dt.timedelta,
+    _sat_dec.Decimal,
+    _sat_plib.PurePath,
+    _sat_re.Pattern,
+    _sat_uuid.UUID,
+)
+
+_SAT_SAFE_BUILTIN_TYPES = (
+    bool, int, float, complex, type(None), bytes, bytearray, range, slice,
+)
+
+class _SaturnoSafeRepr(_sat_reprlib.Repr):
+    def repr_instance(self, _x, _level):
+        if type(_x) in _SAT_SAFE_BUILTIN_TYPES:
+            return super().repr_instance(_x, _level)
+        if isinstance(_x, _SAT_SAFE_STR_TYPES):
+            _s = str(_x)
+            return _s[:80] + ("..." if len(_s) > 80 else "")
+        _cls = type(_x)
+        _cn = _cls.__name__
+        if hasattr(_x, "shape") and hasattr(_x, "dtype"):
+            return f"{{_cn}}(shape={{getattr(_x, 'shape', '')}}, dtype={{getattr(_x, 'dtype', '')}})"
+        if hasattr(_x, "__len__"):
+            try:
+                return f"<{{_cn}} len={{len(_x)}}>"
+            except Exception:
+                pass
+        return f"<{{_cn}}>"
+
+_SAT_RLIB = _SaturnoSafeRepr()
+_SAT_RLIB.maxlist = 6
+_SAT_RLIB.maxtuple = 6
+_SAT_RLIB.maxset = 6
+_SAT_RLIB.maxfrozenset = 6
+_SAT_RLIB.maxdict = 5
+_SAT_RLIB.maxstring = 80
+_SAT_RLIB.maxother = 80
+
 def __saturno_inspect_ns__():
     __saturno_configure_display_libs__()
     import json as _json
-    import reprlib as _reprlib
     import types as _types
-    _rlib = _reprlib.Repr()
-    _rlib.maxlist = 6
-    _rlib.maxtuple = 6
-    _rlib.maxset = 6
-    _rlib.maxdict = 5
-    _rlib.maxstring = 80
-    _rlib.maxother = 80
     _ip = get_ipython()
     _ns = _ip.user_ns if _ip else globals()
     _skip = {{'In', 'Out', 'get_ipython', 'exit', 'quit', 'open'}}
@@ -144,14 +183,25 @@ def __saturno_inspect_ns__():
                 ) + "]"
                 _columns = [{{"name": str(c), "dtype": str(dt)}} for c, dt in _all_pairs]
             elif _tname == "LazyFrame" and hasattr(_v, "collect_schema"):
-                _schema = _v.collect_schema()
-                _col_names = list(_schema.names())
-                _shape = f"cols={{len(_col_names)}}"
-                _cols = [f"{{c}} ({{_schema[c]}})" for c in _col_names[:25]]
-                _preview = "cols: [" + ", ".join(_cols) + (
-                    f", ...+{{len(_col_names)-25}}" if len(_col_names) > 25 else ""
-                ) + "]"
-                _columns = [{{"name": str(c), "dtype": str(_schema[c])}} for c in _col_names[:150]]
+                _allow_schema = True
+                if hasattr(_v, "explain"):
+                    try:
+                        _plan = _v.explain()
+                        if "SCAN " in _plan or "PYTHON SCAN" in _plan:
+                            _allow_schema = False
+                    except Exception:
+                        _allow_schema = False
+                if _allow_schema:
+                    _schema = _v.collect_schema()
+                    _col_names = list(_schema.names())
+                    _shape = f"cols={{len(_col_names)}}"
+                    _cols = [f"{{c}} ({{_schema[c]}})" for c in _col_names[:25]]
+                    _preview = "cols: [" + ", ".join(_cols) + (
+                        f", ...+{{len(_col_names)-25}}" if len(_col_names) > 25 else ""
+                    ) + "]"
+                    _columns = [{{"name": str(c), "dtype": str(_schema[c])}} for c in _col_names[:150]]
+                else:
+                    _preview = "LazyFrame (scan diferido)"
             elif _tname == "Series" and hasattr(_v, "dtype"):
                 if hasattr(_v, "shape"):
                     _shape = str(tuple(_v.shape))
@@ -163,14 +213,14 @@ def __saturno_inspect_ns__():
                 _preview = f"dtype={{getattr(_v, 'dtype', '')}}"
             elif isinstance(_v, (str, bytes, bytearray)):
                 _shape = f"len={{len(_v)}}"
-                _r = _rlib.repr(_v)
+                _r = _SAT_RLIB.repr(_v)
                 _preview = _r[:90] + ("..." if len(_r) > 90 else "")
-            elif isinstance(_v, (list, tuple, set, dict)):
+            elif isinstance(_v, (list, tuple, set, frozenset, dict)):
                 _shape = f"len={{len(_v)}}"
-                _r = _rlib.repr(_v)
+                _r = _SAT_RLIB.repr(_v)
                 _preview = _r[:90] + ("..." if len(_r) > 90 else "")
             else:
-                _r = _rlib.repr(_v)
+                _r = _SAT_RLIB.repr(_v)
                 _preview = _r[:90] + ("..." if len(_r) > 90 else "")
         except Exception:
             _preview = "<unavailable>"
@@ -190,6 +240,102 @@ def __saturno_inspect_ns__():
 
 EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
+_MAX_ACTIVE_SNAPSHOT_OUTPUTS = 400
+_MAX_ACTIVE_SNAPSHOT_STREAM_CHARS = 512_000
+_STREAM_TRUNCATION_NOTICE = "\n… [saída truncada após 512 KB]"
+
+
+class _OutputAccumulator:
+    """O(1)-amortized stream coalescing accumulator with optional snapshot bounds."""
+
+    def __init__(
+        self,
+        *,
+        max_items: int | None = None,
+        max_stream_chars: int | None = None,
+    ) -> None:
+        self._items: list[dict[str, Any]] = []
+        self._stream_chunks: list[str] | None = None
+        self._stream_chars: int = 0
+        self._stream_truncated: bool = False
+        self._max_items = max_items
+        self._max_stream_chars = max_stream_chars
+
+    def clear(self) -> None:
+        self._items.clear()
+        self._stream_chunks = None
+        self._stream_chars = 0
+        self._stream_truncated = False
+
+    def _flush_stream(self) -> None:
+        if self._stream_chunks is not None and self._items:
+            self._items[-1] = {**self._items[-1], "text": "".join(self._stream_chunks)}
+        self._stream_chunks = None
+        self._stream_chars = 0
+        self._stream_truncated = False
+
+    def append(self, out_item: dict[str, Any]) -> None:
+        if out_item.get("output_type") == "stream":
+            name = out_item.get("name", "stdout")
+            text = str(out_item.get("text", ""))
+            if (
+                self._items
+                and self._items[-1].get("output_type") == "stream"
+                and self._items[-1].get("name", "stdout") == name
+            ):
+                if self._stream_chunks is None:
+                    prev = str(self._items[-1].get("text", ""))
+                    self._stream_chunks = [prev] if prev else []
+                    self._stream_chars = len(prev)
+                if self._stream_truncated:
+                    return
+                if (
+                    self._max_stream_chars is not None
+                    and self._stream_chars + len(text) > self._max_stream_chars
+                ):
+                    remaining = max(0, self._max_stream_chars - self._stream_chars)
+                    if remaining:
+                        self._stream_chunks.append(text[:remaining])
+                    self._stream_chunks.append(_STREAM_TRUNCATION_NOTICE)
+                    self._stream_chars = self._max_stream_chars
+                    self._stream_truncated = True
+                elif text:
+                    self._stream_chunks.append(text)
+                    self._stream_chars += len(text)
+                return
+
+            self._flush_stream()
+            if self._max_items is not None and len(self._items) >= self._max_items:
+                return
+            if self._max_stream_chars is not None and len(text) > self._max_stream_chars:
+                self._items.append({**out_item, "name": name, "text": ""})
+                self._stream_chunks = [
+                    text[: self._max_stream_chars],
+                    _STREAM_TRUNCATION_NOTICE,
+                ]
+                self._stream_chars = self._max_stream_chars
+                self._stream_truncated = True
+            else:
+                self._items.append({**out_item, "name": name, "text": ""})
+                self._stream_chunks = [text] if text else []
+                self._stream_chars = len(text)
+                self._stream_truncated = False
+            return
+
+        self._flush_stream()
+        if self._max_items is not None and len(self._items) >= self._max_items:
+            return
+        self._items.append(out_item)
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        if not self._items:
+            return []
+        if self._stream_chunks is None:
+            return list(self._items)
+        res = list(self._items)
+        res[-1] = {**res[-1], "text": "".join(self._stream_chunks)}
+        return res
+
 
 def _python_bin_in_env(env_dir: Path) -> Path:
     if os.name == "nt":
@@ -197,15 +343,8 @@ def _python_bin_in_env(env_dir: Path) -> Path:
     return env_dir / "bin" / "python"
 
 
-_ENV_CACHE: dict[str, tuple[str, str]] = {}
-
-
 def _resolve_kernel_environment(workspace_dir: Path) -> tuple[str, str]:
     """Return (python_executable, extra_site_packages_dir_or_empty)."""
-    cache_key = str(workspace_dir.resolve())
-    if cache_key in _ENV_CACHE:
-        return _ENV_CACHE[cache_key]
-
     candidates: list[Path] = []
 
     # 1. Workspace-local virtual environments take top priority
@@ -248,9 +387,7 @@ def _resolve_kernel_environment(workspace_dir: Path) -> tuple[str, str]:
             if probe.returncode == 0:
                 info = json.loads(probe.stdout.strip())
                 if info.get("has_ipykernel"):
-                    res = (str(cand), "")
-                    _ENV_CACHE[cache_key] = res
-                    return res
+                    return str(cand), ""
                 if (
                     not fallback_site_dir
                     and info.get("ver") == list(sys.version_info[:2])
@@ -260,9 +397,22 @@ def _resolve_kernel_environment(workspace_dir: Path) -> tuple[str, str]:
         except Exception:
             continue
 
-    res = (sys.executable, fallback_site_dir)
-    _ENV_CACHE[cache_key] = res
-    return res
+    return sys.executable, fallback_site_dir
+
+
+def _append_coalesced_output(target: list[dict[str, Any]], out_item: dict[str, Any]) -> None:
+    if (
+        out_item.get("output_type") == "stream"
+        and target
+        and target[-1].get("output_type") == "stream"
+        and target[-1].get("name", "stdout") == out_item.get("name", "stdout")
+    ):
+        target[-1] = {
+            **target[-1],
+            "text": f"{target[-1].get('text', '')}{out_item.get('text', '')}",
+        }
+        return
+    target.append(out_item)
 
 
 class NotebookKernelSession:
@@ -272,29 +422,67 @@ class NotebookKernelSession:
         cwd: Path,
         python_exe: str,
         extra_site_dir: str = "",
+        broadcast_cb: Callable[[dict[str, Any], EventCallback | None], Awaitable[None]] | None = None,
     ) -> None:
         self.notebook_path = notebook_path
         self.cwd = cwd
         self.python_exe = python_exe
         self.extra_site_dir = extra_site_dir
-        self.km = AsyncKernelManager(
-            kernel_cmd=[python_exe, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
-        )
+        self._broadcast_cb = broadcast_cb
+        self.km = AsyncKernelManager(transport="tcp")
+        spec = self.km.kernel_spec
+        if spec is None:
+            raise RuntimeError("Python kernelspec unavailable")
+        spec.argv = [python_exe, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
         self.kc: Any = None
         self.status: str = "starting"
         self.execution_lock = asyncio.Lock()
         self.variables_cache: list[dict[str, Any]] = []
+        self.active_cell_id: str | None = None
+        self.active_execution_count: int | None = None
+        self._active_outputs_buf = _OutputAccumulator(
+            max_items=_MAX_ACTIVE_SNAPSHOT_OUTPUTS,
+            max_stream_chars=_MAX_ACTIVE_SNAPSHOT_STREAM_CHARS,
+        )
         self._abort_epoch: int = 0
+        self._lifecycle_epoch: int = 0
+        self._lifecycle_event = asyncio.Event()
         self._failed_batches: set[str] = set()
+
+    @property
+    def active_outputs(self) -> list[dict[str, Any]]:
+        return self._active_outputs_buf.snapshot()
+
+    async def _emit(
+        self, payload: dict[str, Any], direct_cb: EventCallback | None = None
+    ) -> None:
+        if direct_cb is not None:
+            try:
+                await direct_cb(payload)
+            except Exception:
+                pass
+        if self._broadcast_cb is not None:
+            await self._broadcast_cb(payload, direct_cb)
 
     async def start(self) -> None:
         self.cwd.mkdir(parents=True, exist_ok=True)
-        await self.km.start_kernel(cwd=str(self.cwd))
-        self.kc = self.km.client()
-        self.kc.start_channels()
-        await self.kc.wait_for_ready(timeout=20)
-        await self._run_silent_init()
+        try:
+            await self.km.start_kernel(cwd=str(self.cwd))
+            self.kc = self.km.client()
+            self.kc.start_channels()
+            await self.kc.wait_for_ready(timeout=20)
+            await self._run_silent_init()
+        except (Exception, asyncio.CancelledError):
+            await self._shutdown_unlocked()
+            raise
         self.status = "idle"
+        await self._emit(
+            {
+                "type": "kernel_status",
+                "notebook_path": self.notebook_path,
+                "status": "idle",
+            }
+        )
 
     async def _run_silent_init(self) -> None:
         if not self.kc:
@@ -303,6 +491,8 @@ class NotebookKernelSession:
         if self.extra_site_dir:
             extra_setup = f"import site as _site; _site.addsitedir({self.extra_site_dir!r})"
         init_code = KERNEL_INIT_TEMPLATE.format(extra_site_setup=extra_setup)
+        preview_code = Path(__file__).with_name("output_preview.py").read_text(encoding="utf-8")
+        init_code += "\nexec(" + repr(preview_code + "\ninstall_output_preview(shell)") + ", {'shell': get_ipython()})"
         msg_id = self.kc.execute(init_code, silent=True, store_history=False)
         try:
             while True:
@@ -327,7 +517,7 @@ class NotebookKernelSession:
         self,
         cell_id: str,
         code: str,
-        on_event: EventCallback,
+        on_event: EventCallback | None = None,
         *,
         batch_id: str | None = None,
         stop_on_error: bool = False,
@@ -335,14 +525,15 @@ class NotebookKernelSession:
         queued_epoch = self._abort_epoch
         async with self.execution_lock:
             if queued_epoch != self._abort_epoch or (batch_id and batch_id in self._failed_batches):
-                await on_event(
+                await self._emit(
                     {
                         "type": "cell_execution_done",
                         "notebook_path": self.notebook_path,
                         "cell_id": cell_id,
                         "execution_count": None,
                         "variables": self.variables_cache,
-                    }
+                    },
+                    on_event,
                 )
                 return {
                     "execution_count": None,
@@ -352,21 +543,46 @@ class NotebookKernelSession:
 
             if not self.kc or not await self.km.is_alive():
                 await self.start()
+                if queued_epoch != self._abort_epoch or self._lifecycle_event.is_set():
+                    await self._emit(
+                        {
+                            "type": "cell_execution_done",
+                            "notebook_path": self.notebook_path,
+                            "cell_id": cell_id,
+                            "execution_count": None,
+                            "variables": self.variables_cache,
+                        },
+                        on_event,
+                    )
+                    return {
+                        "execution_count": None,
+                        "outputs": [],
+                        "variables": self.variables_cache,
+                    }
 
             self.status = "busy"
-            await on_event(
+            self.active_cell_id = cell_id
+            self.active_execution_count = None
+            self._active_outputs_buf.clear()
+            start_lifecycle_epoch = self._lifecycle_epoch
+            lifecycle_aborted = False
+            kernel_died = False
+
+            await self._emit(
                 {
                     "type": "kernel_status",
                     "notebook_path": self.notebook_path,
                     "status": "busy",
-                }
+                },
+                on_event,
             )
-            await on_event(
+            await self._emit(
                 {
                     "type": "cell_execution_start",
                     "notebook_path": self.notebook_path,
                     "cell_id": cell_id,
-                }
+                },
+                on_event,
             )
 
             msg_id = self.kc.execute(
@@ -378,16 +594,47 @@ class NotebookKernelSession:
             )
 
             execution_count: int | None = None
-            outputs: list[dict[str, Any]] = []
+            outputs_buf = _OutputAccumulator()
             had_error = False
 
+            def _record_output(item: dict[str, Any]) -> None:
+                outputs_buf.append(item)
+                self._active_outputs_buf.append(item)
+
+            lifecycle_task = asyncio.create_task(self._lifecycle_event.wait())
             try:
                 while True:
+                    if self._lifecycle_epoch != start_lifecycle_epoch:
+                        lifecycle_aborted = True
+                        break
+                    iopub_task = asyncio.create_task(self.kc.get_iopub_msg(timeout=2.0))
+                    done, pending = await asyncio.wait(
+                        {iopub_task, lifecycle_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if lifecycle_task in done or self._lifecycle_epoch != start_lifecycle_epoch:
+                        if iopub_task in pending:
+                            iopub_task.cancel()
+                            try:
+                                await iopub_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                        elif not iopub_task.cancelled():
+                            try:
+                                iopub_task.exception()
+                            except Exception:
+                                pass
+                        lifecycle_aborted = True
+                        break
                     try:
-                        msg = await self.kc.get_iopub_msg(timeout=2.0)
+                        msg = iopub_task.result()
                     except (asyncio.TimeoutError, TimeoutError, queue.Empty):
+                        if self._lifecycle_epoch != start_lifecycle_epoch:
+                            lifecycle_aborted = True
+                            break
                         if not await self.km.is_alive():
                             had_error = True
+                            kernel_died = True
                             out_item = {
                                 "output_type": "error",
                                 "ename": "KernelDied",
@@ -396,15 +643,16 @@ class NotebookKernelSession:
                                     "KernelDied: O processo do kernel foi encerrado inesperadamente."
                                 ],
                             }
-                            outputs.append(out_item)
+                            _record_output(out_item)
                             self.variables_cache = []
-                            await on_event(
+                            await self._emit(
                                 {
                                     "type": "cell_output",
                                     "notebook_path": self.notebook_path,
                                     "cell_id": cell_id,
                                     "output": out_item,
-                                }
+                                },
+                                on_event,
                             )
                             break
                         continue
@@ -417,22 +665,26 @@ class NotebookKernelSession:
 
                     if mtype == "execute_input":
                         execution_count = content.get("execution_count")
-                        await on_event(
+                        self.active_execution_count = execution_count
+                        await self._emit(
                             {
                                 "type": "cell_execution_count",
                                 "notebook_path": self.notebook_path,
                                 "cell_id": cell_id,
                                 "execution_count": execution_count,
-                            }
+                            },
+                            on_event,
                         )
                     elif mtype == "clear_output":
-                        outputs.clear()
-                        await on_event(
+                        outputs_buf.clear()
+                        self._active_outputs_buf.clear()
+                        await self._emit(
                             {
                                 "type": "cell_clear_output",
                                 "notebook_path": self.notebook_path,
                                 "cell_id": cell_id,
-                            }
+                            },
+                            on_event,
                         )
                     elif mtype == "stream":
                         out_item = {
@@ -440,31 +692,34 @@ class NotebookKernelSession:
                             "name": content.get("name", "stdout"),
                             "text": content.get("text", ""),
                         }
-                        outputs.append(out_item)
-                        await on_event(
+                        _record_output(out_item)
+                        await self._emit(
                             {
                                 "type": "cell_output",
                                 "notebook_path": self.notebook_path,
                                 "cell_id": cell_id,
                                 "output": out_item,
-                            }
+                            },
+                            on_event,
                         )
                     elif mtype in ("display_data", "execute_result"):
                         if mtype == "execute_result" and content.get("execution_count") is not None:
                             execution_count = content.get("execution_count")
+                            self.active_execution_count = execution_count
                         out_item = {
                             "output_type": mtype,
                             "data": content.get("data", {}),
                             "execution_count": content.get("execution_count"),
                         }
-                        outputs.append(out_item)
-                        await on_event(
+                        _record_output(out_item)
+                        await self._emit(
                             {
                                 "type": "cell_output",
                                 "notebook_path": self.notebook_path,
                                 "cell_id": cell_id,
                                 "output": out_item,
-                            }
+                            },
+                            on_event,
                         )
                     elif mtype == "error":
                         had_error = True
@@ -474,62 +729,76 @@ class NotebookKernelSession:
                             "evalue": content.get("evalue", ""),
                             "traceback": content.get("traceback", []),
                         }
-                        outputs.append(out_item)
-                        await on_event(
+                        _record_output(out_item)
+                        await self._emit(
                             {
                                 "type": "cell_output",
                                 "notebook_path": self.notebook_path,
                                 "cell_id": cell_id,
                                 "output": out_item,
-                            }
+                            },
+                            on_event,
                         )
                     elif mtype == "status" and content.get("execution_state") == "idle":
                         break
 
-                try:
-                    while True:
-                        reply = await self.kc.get_shell_msg(timeout=2)
-                        if reply.get("parent_header", {}).get("msg_id") == msg_id:
-                            rcontent = reply.get("content", {})
-                            if rcontent.get("status") == "error":
-                                had_error = True
-                            if execution_count is None and rcontent.get("execution_count") is not None:
-                                execution_count = rcontent.get("execution_count")
-                            uexpr = rcontent.get("user_expressions", {}).get("__vars__", {})
-                            if uexpr.get("status") == "ok":
-                                raw_json_repr = uexpr.get("data", {}).get("text/plain", "")
-                                if raw_json_repr:
-                                    parsed_str = ast.literal_eval(raw_json_repr)
-                                    self.variables_cache = json.loads(parsed_str)
-                            break
-                except Exception:
-                    pass
+                if not lifecycle_aborted and not kernel_died:
+                    try:
+                        while True:
+                            reply = await self.kc.get_shell_msg(timeout=2)
+                            if reply.get("parent_header", {}).get("msg_id") == msg_id:
+                                rcontent = reply.get("content", {})
+                                if rcontent.get("status") == "error":
+                                    had_error = True
+                                if execution_count is None and rcontent.get("execution_count") is not None:
+                                    execution_count = rcontent.get("execution_count")
+                                uexpr = rcontent.get("user_expressions", {}).get("__vars__", {})
+                                if uexpr.get("status") == "ok":
+                                    raw_json_repr = uexpr.get("data", {}).get("text/plain", "")
+                                    if raw_json_repr:
+                                        parsed_str = ast.literal_eval(raw_json_repr)
+                                        self.variables_cache = json.loads(parsed_str)
+                                break
+                    except Exception:
+                        pass
 
                 if had_error and stop_on_error:
                     self._mark_batch_failed(batch_id)
 
             finally:
-                self.status = "idle"
-                await on_event(
+                if not lifecycle_task.done():
+                    lifecycle_task.cancel()
+                    try:
+                        await lifecycle_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                self.active_cell_id = None
+                self.active_execution_count = None
+                self._active_outputs_buf.clear()
+                await self._emit(
                     {
                         "type": "cell_execution_done",
                         "notebook_path": self.notebook_path,
                         "cell_id": cell_id,
                         "execution_count": execution_count,
                         "variables": self.variables_cache,
-                    }
+                    },
+                    on_event,
                 )
-                await on_event(
-                    {
-                        "type": "kernel_status",
-                        "notebook_path": self.notebook_path,
-                        "status": "idle",
-                    }
-                )
+                if not lifecycle_aborted:
+                    self.status = "stopped" if kernel_died else "idle"
+                    await self._emit(
+                        {
+                            "type": "kernel_status",
+                            "notebook_path": self.notebook_path,
+                            "status": self.status,
+                        },
+                        on_event,
+                    )
 
             return {
                 "execution_count": execution_count,
-                "outputs": outputs,
+                "outputs": outputs_buf.snapshot(),
                 "variables": self.variables_cache,
             }
 
@@ -540,40 +809,84 @@ class NotebookKernelSession:
 
     async def restart(self) -> None:
         self._abort_epoch += 1
-        self._failed_batches.clear()
-        if await self.km.is_alive():
-            await self.km.restart_kernel(now=True)
-            if self.kc:
-                await self.kc.wait_for_ready(timeout=20)
-            await self._run_silent_init()
-        else:
-            await self.start()
-        self.variables_cache = []
-        self.status = "idle"
+        self._lifecycle_epoch += 1
+        target_epoch = self._lifecycle_epoch
+        self._lifecycle_event.set()
+        try:
+            async with self.execution_lock:
+                if self._lifecycle_epoch == target_epoch:
+                    self._lifecycle_event.clear()
+                self._failed_batches.clear()
+                self.active_cell_id = None
+                self.active_execution_count = None
+                self._active_outputs_buf.clear()
+                if await self.km.is_alive():
+                    await self.km.restart_kernel(now=True)
+                    if self.kc:
+                        await self.kc.wait_for_ready(timeout=20)
+                    await self._run_silent_init()
+                else:
+                    await self.start()
+                self.variables_cache = []
+                self.status = "idle"
+                await self._emit(
+                    {
+                        "type": "kernel_status",
+                        "notebook_path": self.notebook_path,
+                        "status": "idle",
+                    }
+                )
+        finally:
+            if self._lifecycle_epoch == target_epoch:
+                self._lifecycle_event.clear()
 
-    async def shutdown(self) -> None:
-        self._abort_epoch += 1
+    async def _shutdown_unlocked(self) -> None:
+        self.active_cell_id = None
+        self.active_execution_count = None
+        self._active_outputs_buf.clear()
         try:
             if self.kc:
                 self.kc.stop_channels()
-            if await self.km.is_alive():
+        finally:
+            if self.km.has_kernel:
                 await self.km.shutdown_kernel(now=True)
-        except Exception:
-            pass
         self.status = "stopped"
 
-    async def complete(self, code: str, cursor_pos: int) -> dict[str, Any]:
+    async def shutdown(self) -> None:
+        self._abort_epoch += 1
+        self._lifecycle_epoch += 1
+        target_epoch = self._lifecycle_epoch
+        self._lifecycle_event.set()
+        acquired = False
+        try:
+            try:
+                await asyncio.wait_for(self.execution_lock.acquire(), timeout=3.0)
+                acquired = True
+            except asyncio.TimeoutError:
+                pass
+            if self._lifecycle_epoch == target_epoch:
+                self._lifecycle_event.clear()
+            await self._shutdown_unlocked()
+        finally:
+            if self._lifecycle_epoch == target_epoch:
+                self._lifecycle_event.clear()
+            if acquired:
+                self.execution_lock.release()
+
+    async def complete(
+        self, code: str, cursor_pos: int, *, run_jedi_fallback: bool = True
+    ) -> dict[str, Any]:
         cursor_pos = max(0, min(len(code), int(cursor_pos)))
         matches: list[str] = []
         cursor_start: int = cursor_pos
         cursor_end: int = cursor_pos
         exp_types: list[dict[str, Any]] = []
 
-        if self.kc and not self.execution_lock.locked() and await self.km.is_alive():
+        if self.kc and await self.km.is_alive() and not self.execution_lock.locked():
             try:
                 async with self.execution_lock:
                     msg_id = self.kc.complete(code, cursor_pos)
-                    deadline = asyncio.get_running_loop().time() + 1.5
+                    deadline = asyncio.get_running_loop().time() + 0.45
                     while True:
                         remaining = deadline - asyncio.get_running_loop().time()
                         if remaining <= 0:
@@ -591,7 +904,7 @@ class NotebookKernelSession:
             except Exception:
                 pass
 
-        if not matches:
+        if not matches and run_jedi_fallback:
             jedi_res = await asyncio.to_thread(_jedi_complete_fallback, code, cursor_pos)
             matches = jedi_res["matches"]
             cursor_start = jedi_res["cursor_start"]
@@ -609,25 +922,32 @@ class NotebookKernelSession:
         )
 
     async def inspect_symbol(
-        self, code: str, cursor_pos: int, detail_level: int = 0
+        self,
+        code: str,
+        cursor_pos: int,
+        detail_level: int = 0,
+        *,
+        run_jedi_fallback: bool = True,
     ) -> dict[str, Any]:
         cursor_pos = max(0, min(len(code), int(cursor_pos)))
-        candidate_positions: list[int] = [cursor_pos]
+        candidate_positions: list[int] = []
         if cursor_pos > 0 and (
             cursor_pos == len(code) or not (code[cursor_pos].isalnum() or code[cursor_pos] == "_")
         ):
             if code[cursor_pos - 1].isalnum() or code[cursor_pos - 1] == "_":
-                candidate_positions.insert(0, cursor_pos)
+                candidate_positions.append(cursor_pos - 1)
+        if cursor_pos not in candidate_positions:
+            candidate_positions.append(cursor_pos)
         enclosing_pos = _find_enclosing_callable_pos(code, cursor_pos)
         if enclosing_pos is not None and enclosing_pos not in candidate_positions:
             candidate_positions.append(enclosing_pos)
 
-        if self.kc and not self.execution_lock.locked() and await self.km.is_alive():
+        if self.kc and await self.km.is_alive() and not self.execution_lock.locked():
             try:
                 async with self.execution_lock:
                     for pos in candidate_positions:
                         msg_id = self.kc.inspect(code, pos, detail_level=detail_level)
-                        deadline = asyncio.get_running_loop().time() + 1.8
+                        deadline = asyncio.get_running_loop().time() + 0.8
                         while True:
                             remaining = deadline - asyncio.get_running_loop().time()
                             if remaining <= 0:
@@ -644,6 +964,8 @@ class NotebookKernelSession:
             except Exception:
                 pass
 
+        if not run_jedi_fallback:
+            return {"found": False}
         return await asyncio.to_thread(_jedi_inspect_fallback, code, cursor_pos)
 
     async def expand_output(
@@ -910,8 +1232,20 @@ def _build_completion_payload(
         mapped_type = _map_completion_type(raw_t)
         if dot_match and mapped_type == "function":
             mapped_type = "method"
-        detail = sig if sig else ( "chave" if raw_t == "dict key" else (raw_t if raw_t and raw_t != "<unknown>" else ""))
-        boost = 15 if raw_t == "dict key" else (10 if mapped_type in ("method", "function", "property") else 5)
+        detail = (
+            sig
+            if sig
+            else (
+                "chave"
+                if raw_t == "dict key"
+                else (raw_t if raw_t and raw_t != "<unknown>" else "")
+            )
+        )
+        boost = (
+            15
+            if raw_t == "dict key"
+            else (10 if mapped_type in ("method", "function", "property") else 5)
+        )
         if label.startswith("__"):
             boost = -15
         elif label.startswith("_"):
@@ -965,25 +1299,19 @@ def _jedi_complete_fallback(code: str, cursor_pos: int) -> dict[str, Any]:
         line, col = _offset_to_line_col(code, cursor_pos)
         script = jedi.Script(code)
         completions = script.complete(line, col)
+        # Avoid calling c.get_signatures() inside this loop: inferring call signatures
+        # across 200 items on large modules (pandas/numpy) adds 500ms-2000ms per keystroke.
+        # Full signatures remain available via Shift+Tab (`inspect_symbol`).
         for c in completions[:200]:
             name = c.name
             if not name:
                 continue
             matches.append(name)
-            sig = ""
-            try:
-                sigs = c.get_signatures()
-                if sigs:
-                    full_sig = sigs[0].to_string()
-                    paren_idx = full_sig.find("(")
-                    sig = full_sig[paren_idx:] if paren_idx != -1 else full_sig
-            except Exception:
-                pass
             exp_types.append(
                 {
                     "text": name,
                     "type": c.type or "",
-                    "signature": sig,
+                    "signature": "",
                 }
             )
     except Exception:
@@ -1042,7 +1370,7 @@ def _parse_ipython_inspect(raw_plain: str, fallback_name: str = "") -> dict[str,
 
     return {
         "found": True,
-        "name": name or fallback_name or " Objeto",
+        "name": name or fallback_name or "Objeto",
         "signature": signature,
         "type_name": type_name,
         "docstring": docstring,
@@ -1054,10 +1382,17 @@ def _parse_ipython_inspect(raw_plain: str, fallback_name: str = "") -> dict[str,
 
 def _jedi_inspect_fallback(code: str, cursor_pos: int) -> dict[str, Any]:
     cursor_pos = max(0, min(len(code), int(cursor_pos)))
+    # If cursor is right after an identifier (`df.head|`), step back 1 char so Jedi finds the symbol.
+    probe_pos = cursor_pos
+    if probe_pos > 0 and (
+        probe_pos == len(code) or not (code[probe_pos].isalnum() or code[probe_pos] == "_")
+    ):
+        if code[probe_pos - 1].isalnum() or code[probe_pos - 1] == "_":
+            probe_pos -= 1
     try:
         import jedi
 
-        line, col = _offset_to_line_col(code, cursor_pos)
+        line, col = _offset_to_line_col(code, probe_pos)
         script = jedi.Script(code)
 
         # 1. Try direct help at cursor
@@ -1074,7 +1409,7 @@ def _jedi_inspect_fallback(code: str, cursor_pos: int) -> dict[str, Any]:
                     doc = doc[len(sig) :].strip()
                 return {
                     "found": True,
-                    "name": h.full_name or h.name or _extract_symbol_near(code, cursor_pos),
+                    "name": h.full_name or h.name or _extract_symbol_near(code, probe_pos),
                     "signature": sig,
                     "type_name": h.type or "",
                     "docstring": doc,
@@ -1084,7 +1419,8 @@ def _jedi_inspect_fallback(code: str, cursor_pos: int) -> dict[str, Any]:
                 }
 
         # 2. Try enclosing call signature (e.g. cursor inside func(|))
-        sigs = script.get_signatures(line, col)
+        line_orig, col_orig = _offset_to_line_col(code, cursor_pos)
+        sigs = script.get_signatures(line_orig, col_orig)
         for s in sigs:
             sig_str = s.to_string()
             doc = (s.docstring(raw=False) or "").strip()
@@ -1109,6 +1445,49 @@ class SaturnoKernelRegistry:
     def __init__(self) -> None:
         self._sessions: dict[str, NotebookKernelSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._listeners: set[EventCallback] = set()
+
+    def add_listener(self, cb: EventCallback) -> None:
+        self._listeners.add(cb)
+
+    def remove_listener(self, cb: EventCallback) -> None:
+        self._listeners.discard(cb)
+
+    async def broadcast(
+        self, payload: dict[str, Any], exclude: EventCallback | None = None
+    ) -> None:
+        if not self._listeners:
+            return
+        for cb in list(self._listeners):
+            if cb is exclude:
+                continue
+            try:
+                await cb(payload)
+            except Exception:
+                pass
+
+    def snapshot_workspace(self, workspace_root: Path) -> list[dict[str, Any]]:
+        ws_resolved = workspace_root.resolve()
+        snapshots: list[dict[str, Any]] = []
+        for key, session in list(self._sessions.items()):
+            try:
+                if not Path(key).is_relative_to(ws_resolved):
+                    continue
+            except Exception:
+                continue
+            if session.status == "stopped":
+                continue
+            snapshots.append(
+                {
+                    "notebook_path": session.notebook_path,
+                    "status": session.status,
+                    "variables": session.variables_cache,
+                    "active_cell_id": session.active_cell_id,
+                    "active_execution_count": session.active_execution_count,
+                    "active_outputs": list(session.active_outputs),
+                }
+            )
+        return snapshots
 
     async def get_or_create(
         self, workspace_root: Path, notebook_rel_path: str
@@ -1119,6 +1498,9 @@ class SaturnoKernelRegistry:
             session = self._sessions.get(key)
             if session and await session.km.is_alive():
                 return session
+            if session:
+                await session.shutdown()
+                self._sessions.pop(key)
             nb_full = (workspace_root / notebook_rel_path).resolve()
             nb_cwd = nb_full.parent if nb_full.parent.exists() else workspace_root.resolve()
             py_exe, extra_site = await asyncio.to_thread(
@@ -1129,6 +1511,7 @@ class SaturnoKernelRegistry:
                 cwd=nb_cwd,
                 python_exe=py_exe,
                 extra_site_dir=extra_site,
+                broadcast_cb=self.broadcast,
             )
             await session.start()
             self._sessions[key] = session
@@ -1147,12 +1530,29 @@ class SaturnoKernelRegistry:
                 "status": s.status,
                 "python_executable": s.python_exe,
                 "variables_count": len(s.variables_cache),
+                "active_cell_id": s.active_cell_id,
             }
             for s in self._sessions.values()
         ]
 
-    async def shutdown_notebook(self, workspace_root: Path, notebook_rel_path: str) -> None:
-        key_path = (workspace_root / notebook_rel_path).resolve()
+    async def shutdown_notebook(
+        self,
+        workspace_root: Path,
+        notebook_rel_path: str,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        if not follow_symlinks:
+            try:
+                lexical = fs_service.safe_resolve_lexical(workspace_root, notebook_rel_path)
+            except PermissionError:
+                return
+            if lexical.is_symlink():
+                # Deleting/renaming/moving a symlink does not affect the symlink target's kernels.
+                return
+            key_path = lexical.resolve()
+        else:
+            key_path = (workspace_root / notebook_rel_path).resolve()
         # A filesystem operation may target a folder containing open notebooks.
         keys = [
             active

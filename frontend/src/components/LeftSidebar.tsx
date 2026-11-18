@@ -13,6 +13,53 @@ import { FileTypeIcon } from './FileTypeIcon';
 let fileClipboard: string[] = [];
 let clipboardCut = false;
 const parentOf = (path: string) => path.split('/').slice(0, -1).join('/');
+
+interface CachedOutlineItem {
+  cellId: string;
+  index: number;
+  ordinal: number;
+  level: number;
+  title: string;
+  collapsed: boolean;
+}
+
+const EMPTY_OUTLINE: CachedOutlineItem[] = [];
+let prevOutline: CachedOutlineItem[] = EMPTY_OUTLINE;
+
+function selectActiveOutline(state: ReturnType<typeof useSaturnoStore.getState>): CachedOutlineItem[] {
+  if (state.leftSidebar !== 'outline') return EMPTY_OUTLINE;
+  const tab = state.tabs.find((t) => t.id === state.activeTabId);
+  if (!tab || tab.kind !== 'notebook') return EMPTY_OUTLINE;
+  const raw = notebookOutline(tab.cells);
+  if (raw.length === 0) {
+    prevOutline = EMPTY_OUTLINE;
+    return EMPTY_OUTLINE;
+  }
+  const same =
+    raw.length === prevOutline.length &&
+    raw.every((h, i) => {
+      const p = prevOutline[i];
+      return (
+        p.cellId === h.cellId &&
+        p.index === h.index &&
+        p.ordinal === h.ordinal &&
+        p.level === h.level &&
+        p.title === h.title &&
+        p.collapsed === Boolean(tab.cells[h.index]?.sectionCollapsed)
+      );
+    });
+  if (!same) {
+    prevOutline = raw.map((h) => ({
+      cellId: h.cellId,
+      index: h.index,
+      ordinal: h.ordinal,
+      level: h.level,
+      title: h.title,
+      collapsed: Boolean(tab.cells[h.index]?.sectionCollapsed),
+    }));
+  }
+  return prevOutline;
+}
 async function copyPathText(text: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
     try {
@@ -37,19 +84,32 @@ async function copyPathText(text: string): Promise<boolean> {
   }
 }
 export const LeftSidebar: React.FC = React.memo(() => {
-  const s = useSaturnoStore(useShallow(s => ({
-    initialized: s.initialized,
-    workspaceRoot: s.workspaceRoot,
-    panel: s.leftSidebar, position: s.sidebarPosition, width: s.sidebarWidth,
-    files: s.files, expanded: s.expandedFolders, children: s.folderChildren,
-    selected: s.selectedFilePaths, folder: s.activeFolderContext, showTime: s.showModifiedTime,
-    tab: s.leftSidebar === 'outline' || s.leftSidebar === 'variables' ? s.tabs.find(t => t.id === s.activeTabId) : undefined,
-  })));
+  const s = useSaturnoStore(useShallow((state) => {
+    const activeTab =
+      state.leftSidebar === 'outline' || state.leftSidebar === 'variables'
+        ? state.tabs.find((t) => t.id === state.activeTabId)
+        : undefined;
+    const nb = activeTab?.kind === 'notebook' ? activeTab : undefined;
+    return {
+      initialized: state.initialized,
+      workspaceRoot: state.workspaceRoot,
+      panel: state.leftSidebar,
+      position: state.sidebarPosition,
+      width: state.sidebarWidth,
+      files: state.files,
+      expanded: state.expandedFolders,
+      children: state.folderChildren,
+      selected: state.selectedFilePaths,
+      folder: state.activeFolderContext,
+      showTime: state.showModifiedTime,
+      notebookId: nb?.id,
+      variables: state.leftSidebar === 'variables' ? nb?.variables : undefined,
+    };
+  }));
+  const headings = useSaturnoStore(selectActiveOutline);
   const a = useSaturnoStore.getState();
   const nodes = useMemo(() => flattenVisibleTree(s.files, s.expanded, s.children), [s.files, s.expanded, s.children]);
   const paths = nodes.map(n => n.entry.path);
-  const notebook = s.tab?.kind === 'notebook' ? s.tab : undefined;
-  const headings = useMemo(() => notebookOutline(notebook?.cells || []), [notebook?.cells]);
   const [context, setContext] = useState<{ x: number; y: number; entry?: FileEntry } | null>(null);
   const [naming, setNaming] = useState<{ kind: string; folder: string; entry?: FileEntry } | null>(null);
   const [name, setName] = useState('');
@@ -105,12 +165,35 @@ export const LeftSidebar: React.FC = React.memo(() => {
     });
   };
   const navigate = (cellId: string, ordinal: number) => {
-    if (!notebook) return;
+    const nbId = s.notebookId;
+    if (!nbId) return;
+    const target = headings.find((h) => h.cellId === cellId);
     // Reveal parent sections before navigating to a hidden heading.
-    useSaturnoStore.setState(state => ({ tabs: state.tabs.map(t => t.id === notebook.id && t.kind === 'notebook' ? { ...t, cells: t.cells.map((c, index) => { const h = headings.find(h => h.cellId === c.id); const target = headings.find(h => h.cellId === cellId); const end = h ? headings.find(next => next.index > index && next.level <= h.level)?.index ?? t.cells.length : index; return h && target && index <= target.index && target.index < end ? { ...c, sectionCollapsed: false } : c; }) } : t) }));
+    if (target) {
+      useSaturnoStore.setState((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === nbId && t.kind === 'notebook'
+            ? {
+                ...t,
+                cells: t.cells.map((c, index) => {
+                  const h = headings.find((item) => item.cellId === c.id);
+                  const end = h
+                    ? headings.find((next) => next.index > index && next.level <= h.level)?.index ??
+                      t.cells.length
+                    : index;
+                  return h && index <= target.index && target.index < end
+                    ? { ...c, sectionCollapsed: false }
+                    : c;
+                }),
+              }
+            : t
+        ),
+      }));
+    }
     a.selectCell(cellId, 'command', true);
     requestAnimationFrame(() => {
-      const cell = Array.from(document.querySelectorAll('[data-cell-id]')).find(el => el.getAttribute('data-cell-id') === cellId);
+      const panel = document.querySelector(`[data-tab-panel="${CSS.escape(nbId)}"]:not([hidden])`);
+      const cell = panel?.querySelector(`[data-cell-id="${CSS.escape(cellId)}"]`);
       cell?.querySelectorAll('.jp-markdown-rendered h1, .jp-markdown-rendered h2, .jp-markdown-rendered h3, .jp-markdown-rendered h4, .jp-markdown-rendered h5, .jp-markdown-rendered h6')[ordinal]?.scrollIntoView({ block: 'nearest' });
     });
   };
@@ -217,13 +300,13 @@ export const LeftSidebar: React.FC = React.memo(() => {
       {s.panel === 'outline' && <div className="flex-1 overflow-auto py-2">
         {!headings.length && <p className="p-4 text-sm" style={{color:'var(--sat-text-muted)'}}>Os títulos Markdown (H1–H6) do notebook aparecem aqui.</p>}
         {headings.map(h => <div key={`${h.cellId}-${h.ordinal}`} className="flex items-center pr-2" style={{paddingLeft:8+(h.level-1)*12}}>
-          {h.ordinal === 0 ? <button title="Recolher / expandir seção" aria-expanded={!notebook?.cells[h.index].sectionCollapsed} className="sat-icon-btn p-1" onClick={()=>a.toggleSection(h.cellId)}>{notebook?.cells[h.index].sectionCollapsed ? <ChevronRight size={14}/> : <ChevronDown size={14}/>}</button> : <span className="w-6"/>}
+          {h.ordinal === 0 ? <button title="Recolher / expandir seção" aria-expanded={!h.collapsed} className="sat-icon-btn p-1" onClick={()=>a.toggleSection(h.cellId)}>{h.collapsed ? <ChevronRight size={14}/> : <ChevronDown size={14}/>}</button> : <span className="w-6"/>}
           <button className="text-sm py-1.5 px-2 my-0.5 rounded truncate text-left flex-1 hover:bg-[var(--sat-bg-hover)] transition-colors" title={h.title} onClick={()=>navigate(h.cellId,h.ordinal)}>{h.title}</button>
         </div>)}
       </div>}
       {s.panel === 'variables' && <div className="flex-1 overflow-auto p-3 space-y-3">
-        {!notebook?.variables.length && <p className="text-sm" style={{color:'var(--sat-text-muted)'}}>Execute uma célula para inspecionar as variáveis.</p>}
-        {notebook?.variables.map(v=><div key={v.name} className="border rounded p-3 text-sm" style={{borderColor:'var(--sat-border)'}}><b>{v.name}</b><span className="ml-2 opacity-70">{v.type} {v.shape}</span><pre className="text-xs whitespace-pre-wrap mt-2">{v.preview}</pre></div>)}
+        {!s.variables?.length && <p className="text-sm" style={{color:'var(--sat-text-muted)'}}>Execute uma célula para inspecionar as variáveis.</p>}
+        {s.variables?.map(v=><div key={v.name} className="border rounded p-3 text-sm" style={{borderColor:'var(--sat-border)'}}><b>{v.name}</b><span className="ml-2 opacity-70">{v.type} {v.shape}</span><pre className="text-xs whitespace-pre-wrap mt-2">{v.preview}</pre></div>)}
       </div>}
       <div className={`absolute inset-y-0 w-1.5 cursor-col-resize ${s.position==='left'?'right-0':'left-0'}`} title="Redimensionar painel"
         onMouseDown={e=>{ e.preventDefault(); const start=e.clientX, width=s.width; const move=(event:MouseEvent)=>a.setSidebarWidth(width+(event.clientX-start)*(s.position==='left'?1:-1),false); const end=()=>{a.setSidebarWidth(useSaturnoStore.getState().sidebarWidth,true);window.removeEventListener('mousemove',move);window.removeEventListener('mouseup',end);};window.addEventListener('mousemove',move);window.addEventListener('mouseup',end); }} />

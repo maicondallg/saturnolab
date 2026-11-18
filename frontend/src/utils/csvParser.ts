@@ -102,7 +102,7 @@ export function parseCsv(rawContent: string, forcedDelimiter?: string): ParsedCs
       continue;
     }
 
-    if (ch === '"') {
+    if (ch === '"' && currentField.length === 0) {
       inQuotes = true;
     } else if (ch === delimiter) {
       currentRow.push(currentField);

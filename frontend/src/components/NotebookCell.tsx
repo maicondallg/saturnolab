@@ -17,7 +17,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { NotebookCellData } from '../types/notebook';
-import { useSaturnoStore } from '../store/useSaturnoStore';
+import { canAcceptInlineAIPreview, useSaturnoStore } from '../store/useSaturnoStore';
 import { isThemeDark } from '../themes';
 import { CodeMirrorCellEditor } from './CodeMirrorCellEditor';
 import { InlineAIPopover } from './InlineAIPopover';
@@ -27,9 +27,11 @@ import { CellOutputView } from './CellOutputView';
 interface Props {
   cell: NotebookCellData;
   isActive: boolean;
+  previousId?: string;
+  nextId?: string;
 }
 
-export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => {
+export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive, previousId, nextId }) => {
   const {
     darkTheme,
     outputLimitedDefault,
@@ -72,21 +74,23 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
       'Corrija o erro desta célula mantendo o objetivo do código', errSummary);
   }, [cell.id, selectCell, openInlineAI]);
 
+  const defaultHeight = useSaturnoStore(s => s.config?.output_height ?? 256);
+  const [height, setHeight] = useState<number>();
   const [outputLimited, setOutputLimited] = useState(outputLimitedDefault);
   const [searchTriggerSeq, setSearchTriggerSeq] = useState(0);
 
   useEffect(() => {
     if (cell.isRunning) setOutputLimited(outputLimitedDefault);
   }, [cell.isRunning, outputLimitedDefault]);
-  const heading = notebookOutline([cell])[0];
   const isEditing = isActive && notebookMode === 'edit';
+  const heading = cell.cell_type === 'markdown' ? notebookOutline([cell])[0] : undefined;
 
   const renderedMarkdownHtml = useMemo(() => {
-    if (cell.cell_type !== 'markdown') return '';
+    if (cell.cell_type !== 'markdown' || isEditing) return '';
     const raw = cell.source.trim() || '*Duplo clique para editar Markdown*';
     const parsed = marked.parse(raw, { async: false }) as string;
     return DOMPurify.sanitize(parsed);
-  }, [cell.cell_type, cell.source]);
+  }, [cell.cell_type, cell.source, isEditing]);
 
   const externalBarColor = !isActive
     ? 'transparent'
@@ -95,12 +99,12 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
       : 'var(--sat-cmd-bar)';
 
   const hasOutput = cell.cell_type === 'code' && cell.outputs.length > 0;
-  const isShortEditor = cell.source.split('\n').length <= 3;
 
   const outputControls = hasOutput ? (
     <div
-      className={isShortEditor ? 'output-controls-inline' : 'output-controls'}
+      className="output-controls select-none"
       aria-label="Controles da saída"
+      onClick={(e) => e.stopPropagation()}
     >
       <button
         type="button"
@@ -123,6 +127,17 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
         >
           {outputLimited ? <ChevronsUpDown size={13} /> : <ChevronsDownUp size={13} />}
         </button>
+      )}
+      {outputLimited && !cell.outputCollapsed && (
+        <label className="flex items-center gap-1 text-xs">
+          <input aria-label="Altura desta saída em pixels" type="number" min={80} max={1600}
+            className="w-14" key={defaultHeight} defaultValue={height ?? defaultHeight}
+            onBlur={e => {
+              const value = e.currentTarget.valueAsNumber;
+              if (Number.isInteger(value) && e.currentTarget.validity.valid) setHeight(value);
+              else e.currentTarget.value = String(height ?? defaultHeight);
+            }} />px
+        </label>
       )}
       {cell.outputs.length > 0 && (
         <button
@@ -229,7 +244,73 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
         </div>
 
         {/* Cell Box */}
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 relative">
+          {/* Compact Top-Right Floating Cell Actions */}
+          <div
+            data-cell-surface
+            className="cell-actions select-none"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                selectCell(cell.id, 'edit');
+                openInlineAI(cell.id, null);
+              }}
+              title="IA Inline (Ctrl+I)"
+              aria-label="IA Inline (Ctrl+I)"
+              className="cell-action-btn"
+            >
+              <Sparkles size={12.5} style={{ color: 'var(--sat-accent)' }} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (cell.cell_type === 'markdown' && cell.markdownRendered) {
+                  setMarkdownRendered(cell.id, false);
+                }
+                selectCell(cell.id, 'edit');
+                setSearchTriggerSeq((n) => n + 1);
+              }}
+              title="Localizar e substituir na célula (Ctrl+F / Ctrl+H)"
+              aria-label="Localizar e substituir na célula"
+              className="cell-action-btn"
+            >
+              <Search size={12} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => moveCell(cell.id, 'up')}
+              title="Mover para cima (Alt+↑)"
+              aria-label="Mover para cima"
+              className="cell-action-btn"
+            >
+              <ArrowUp size={12.5} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => moveCell(cell.id, 'down')}
+              title="Mover para baixo (Alt+↓)"
+              aria-label="Mover para baixo"
+              className="cell-action-btn"
+            >
+              <ArrowDown size={12.5} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => deleteCell(cell.id)}
+              title="Excluir célula (D, D)"
+              aria-label="Excluir célula"
+              className="cell-action-btn is-danger"
+            >
+              <Trash2 size={12.5} />
+            </button>
+          </div>
+
           {cell.cell_type === 'markdown' && cell.markdownRendered && !isEditing ? (
             <div
               onDoubleClick={() => {
@@ -276,8 +357,21 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
                 onChange={(val) => updateCellSource(cell.id, val)}
                 onFocus={() => selectCell(cell.id, 'edit')}
                 onShiftEnter={() => runCell(cell.id, 'next')}
-                onCtrlEnter={() => runCell(cell.id, 'none')}
+                onCtrlEnter={() => {
+                  const store = useSaturnoStore.getState();
+                  if (canAcceptInlineAIPreview(store.inlineAI[cell.id])) {
+                    store.acceptInlineAI(cell.id, true);
+                    return;
+                  }
+                  runCell(cell.id, 'none');
+                }}
                 onAltEnter={() => runCell(cell.id, 'insert')}
+                onNavigate={down => {
+                  const id = down ? nextId : previousId;
+                  if (!id) return false;
+                  selectCell(id, 'edit', true);
+                  return true;
+                }}
                 onMoveUp={() => moveCell(cell.id, 'up')}
                 onMoveDown={() => moveCell(cell.id, 'down')}
                 onToggleType={() =>
@@ -294,7 +388,7 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
 
               {hasOutput && (
                 <div data-cell-output-id={cell.id} className="cell-output relative rounded-b-[3px]">
-                  {!isShortEditor && outputControls}
+                  {outputControls}
                   {cell.outputCollapsed && (
                     <button
                       type="button"
@@ -308,7 +402,8 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
                   {!cell.outputCollapsed && (
                     <div
                       id={`output-${cell.id}`}
-                      className={`${outputLimited ? 'max-h-64 overflow-auto' : 'overflow-hidden'} rounded-b-[3px]`}
+                      className="overflow-auto rounded-b-[3px]"
+                      style={{ '--sat-output-height': `${height ?? defaultHeight}px`, maxHeight: outputLimited ? height ?? defaultHeight : '75vh' } as React.CSSProperties}
                       tabIndex={outputLimited ? 0 : undefined}
                       aria-label="Conteúdo da saída"
                     >
@@ -318,7 +413,6 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
                         outputLimited={outputLimited}
                         cellId={cell.id}
                         executionCount={cell.execution_count}
-                        cellSource={cell.source}
                       />
                     </div>
                   )}
@@ -326,84 +420,6 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive }) => 
               )}
             </div>
           )}
-        </div>
-
-        {/* Right External Stacked Actions (outside cell box) */}
-        <div
-          data-cell-surface
-          className="cell-right-rail relative w-7 self-stretch shrink-0 select-none"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="cell-actions">
-            <button
-              type="button"
-              onClick={() => {
-                selectCell(cell.id, 'edit');
-                openInlineAI(cell.id, null);
-              }}
-              title="IA Inline (Ctrl+I)"
-              aria-label="IA Inline (Ctrl+I)"
-              className="cell-action-btn"
-            >
-              <Sparkles size={13} style={{ color: 'var(--sat-accent)' }} />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                if (cell.cell_type === 'markdown' && cell.markdownRendered) {
-                  setMarkdownRendered(cell.id, false);
-                }
-                selectCell(cell.id, 'edit');
-                setSearchTriggerSeq((n) => n + 1);
-              }}
-              title="Localizar e substituir na célula (Ctrl+F / Ctrl+H)"
-              aria-label="Localizar e substituir na célula"
-              className="cell-action-btn"
-            >
-              <Search size={12.5} />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => moveCell(cell.id, 'up')}
-              title="Mover para cima (Alt+↑)"
-              aria-label="Mover para cima"
-              className="cell-action-btn"
-            >
-              <ArrowUp size={13} />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => moveCell(cell.id, 'down')}
-              title="Mover para baixo (Alt+↓)"
-              aria-label="Mover para baixo"
-              className="cell-action-btn"
-            >
-              <ArrowDown size={13} />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => deleteCell(cell.id)}
-              title="Excluir célula (D, D)"
-              aria-label="Excluir célula"
-              className="cell-action-btn is-danger"
-            >
-              <Trash2 size={13} />
-            </button>
-
-            {isShortEditor && hasOutput && (
-              <>
-                <div
-                  className="w-3.5 h-px my-0.5"
-                  style={{ backgroundColor: 'var(--sat-border)' }}
-                />
-                {outputControls}
-              </>
-            )}
-          </div>
         </div>
       </div>
 

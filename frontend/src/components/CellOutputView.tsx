@@ -1,8 +1,10 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import DOMPurify from 'dompurify';
 import {
   Check,
+  FileText,
+  Table2,
   ChevronsLeftRight,
   Copy,
   Download,
@@ -12,8 +14,9 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
+import { StructuredOutput, isPreview } from './StructuredOutput';
 import { CellOutput } from '../types/notebook';
-import { useSaturnoStore } from '../store/useSaturnoStore';
+import { useSaturnoStore, findNotebookTabForCell } from '../store/useSaturnoStore';
 import { api } from '../services/api';
 import { TableOutputView } from './TableOutputView';
 import {
@@ -33,7 +36,6 @@ interface Props {
   outputLimited?: boolean;
   cellId?: string;
   executionCount?: number | null;
-  cellSource?: string;
 }
 
 function triggerDataUrlDownload(dataUrl: string, filename: string) {
@@ -125,6 +127,18 @@ const ImageOutputCard: React.FC<{
   const [copied, setCopied] = useState(false);
   const [lightboxOpen, setLightboxOpen] = useState(false);
 
+  useEffect(() => {
+    if (!lightboxOpen) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setLightboxOpen(false);
+    };
+    window.addEventListener('keydown', close, true);
+    return () => window.removeEventListener('keydown', close, true);
+  }, [lightboxOpen]);
+
   const handleDownload = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
@@ -152,7 +166,7 @@ const ImageOutputCard: React.FC<{
     <>
       <div
         data-image-output="true"
-        className="group/img relative inline-block max-w-full rounded-[4px] bg-white p-1.5 border"
+        className="group/img relative isolate inline-block min-w-36 min-h-12 max-w-full rounded-[4px] bg-white p-1.5 border"
         style={{ borderColor: 'var(--sat-border)' }}
       >
         {/* Top-Right Hover Action Bar for Image Download / Copy / Expand */}
@@ -294,26 +308,48 @@ const ImageOutputCard: React.FC<{
   );
 });
 
+function PageControls({ page, count, change }: { page: number; count: number; change: (page: number) => void }) {
+  if (count <= 1) return null;
+  return <nav aria-label="Páginas da saída" className="flex items-center gap-3 text-xs py-1">
+    <button disabled={!page} onClick={() => change(page - 1)}>← Anterior</button>
+    <span>{page + 1} / {count}</span>
+    <button disabled={page + 1 >= count} onClick={() => change(page + 1)}>Próxima →</button>
+  </nav>;
+}
+
+function TextOutput({ text, className = '', ansi = false }: { text: string; className?: string; ansi?: boolean }) {
+  const [requested, change] = useState(0);
+  const count = Math.max(1, Math.ceil(text.length / 16384));
+  const page = Math.min(requested, count - 1);
+  const chunk = text.slice(page * 16384, (page + 1) * 16384);
+  return <div><PageControls page={page} count={count} change={change} />
+    <pre className={`m-0 overflow-auto whitespace-pre font-mono text-[13px] leading-relaxed ${className}`}>{ansi ? stripAnsi(chunk) : chunk}</pre>
+  </div>;
+}
+
 export const CellOutputView: React.FC<Props> = React.memo(
-  ({ outputs, onFixErrorWithAI, outputLimited = false, executionCount, cellSource }) => {
+  ({ outputs, onFixErrorWithAI, outputLimited = false, cellId, executionCount }) => {
+    const [requested, change] = useState(0);
+    const count = Math.ceil(outputs.length / 64);
+    const page = Math.min(requested, Math.max(0, count - 1));
     if (!outputs || outputs.length === 0) return null;
 
     return (
       <div
-        className="px-3.5 py-2.5 space-y-2 border-t"
+        className="px-3.5 py-2.5 space-y-2"
         style={{
           backgroundColor: 'var(--sat-bg-canvas)',
-          borderColor: 'var(--sat-border)',
         }}
       >
-        {outputs.map((out, idx) => (
+        <PageControls page={page} count={count} change={change} />
+        {outputs.slice(page * 64, (page + 1) * 64).map((out, idx) => (
           <OutputItem
-            key={idx}
+            key={page * 64 + idx}
             out={out}
             onFixErrorWithAI={onFixErrorWithAI}
             outputLimited={outputLimited}
             executionCount={out.execution_count ?? executionCount ?? null}
-            cellSource={cellSource}
+            cellId={cellId}
           />
         ))}
       </div>
@@ -327,13 +363,13 @@ const OutputItem = React.memo(
     onFixErrorWithAI,
     outputLimited,
     executionCount,
-    cellSource,
+    cellId,
   }: {
     out: CellOutput;
     onFixErrorWithAI: Props['onFixErrorWithAI'];
     outputLimited: boolean;
     executionCount: number | null;
-    cellSource?: string;
+    cellId?: string;
   }) => {
     const [expandedData, setExpandedData] = useState<{
       html?: string | null;
@@ -341,6 +377,35 @@ const OutputItem = React.memo(
     } | null>(null);
     const [showingExpanded, setShowingExpanded] = useState(false);
     const [expandingFromKernel, setExpandingFromKernel] = useState(false);
+
+    useEffect(() => {
+      setExpandedData(null);
+      setShowingExpanded(false);
+    }, [out]);
+
+    const originalDefault = useSaturnoStore(s => s.config?.output_format === 'original');
+    const [originalOverride, setOriginal] = useState<boolean>();
+    const original = originalOverride ?? originalDefault;
+    const rawData = out.data;
+    const candidate = rawData?.['application/vnd.saturno.preview+json'];
+    const preview = useMemo(() => isPreview(candidate) ? candidate : undefined, [candidate]);
+    const rawHtmlForMemo = rawData?.['text/html'] ? String(rawData['text/html']) : '';
+    const explicitPlotlySpec = rawData?.['application/vnd.plotly.v1+json'];
+    const plotlySpec = useMemo(
+      () =>
+        explicitPlotlySpec || (rawHtmlForMemo ? extractPlotlySpecFromHtml(rawHtmlForMemo) : null),
+      [explicitPlotlySpec, rawHtmlForMemo]
+    );
+    const rawSvg = rawData?.['image/svg+xml'];
+    const sanitizedSvgHtml = useMemo(
+      () =>
+        rawSvg
+          ? DOMPurify.sanitize(String(rawSvg), {
+              USE_PROFILES: { svg: true, svgFilters: true },
+            })
+          : '',
+      [rawSvg]
+    );
 
     const handleExpandFromKernel = useCallback(async () => {
       if (showingExpanded) {
@@ -352,13 +417,17 @@ const OutputItem = React.memo(
         return;
       }
       const state = useSaturnoStore.getState();
-      const activeTab = state.tabs.find((t) => t.id === state.activeTabId);
+      const activeTab = findNotebookTabForCell(state.tabs, state.activeTabId, cellId);
       const nbPath = activeTab?.kind === 'notebook' ? activeTab.path : '';
       if (!nbPath) return;
+      const latestSource =
+        activeTab?.kind === 'notebook'
+          ? activeTab.cells.find((c) => c.id === cellId)?.source || ''
+          : '';
 
       setExpandingFromKernel(true);
       try {
-        const res = await api.expandOutput(nbPath, executionCount, cellSource || '');
+        const res = await api.expandOutput(nbPath, executionCount, latestSource);
         if (res.found && (res['text/html'] || res['text/plain'])) {
           setExpandedData({
             html: res['text/html'],
@@ -371,18 +440,12 @@ const OutputItem = React.memo(
       } finally {
         setExpandingFromKernel(false);
       }
-    }, [showingExpanded, expandedData, executionCount, cellSource]);
+    }, [showingExpanded, expandedData, executionCount, cellId]);
 
     if (out.output_type === 'stream') {
       const isErr = out.name === 'stderr';
       return (
-        <pre
-          className={`m-0 font-mono text-[13px] leading-relaxed whitespace-pre-wrap break-words ${
-            isErr ? 'text-amber-500 bg-amber-500/10 p-2 rounded-[3px]' : ''
-          }`}
-        >
-          {stripAnsi(out.text || '')}
-        </pre>
+        <TextOutput text={out.text || ''} ansi className={isErr ? 'text-amber-500 bg-amber-500/10 p-2 rounded' : ''} />
       );
     }
 
@@ -416,16 +479,14 @@ const OutputItem = React.memo(
               <span>Corrigir com IA</span>
             </button>
           </div>
-          <pre className="m-0 font-mono text-xs whitespace-pre-wrap leading-relaxed opacity-90">
-            {tbText}
-          </pre>
+          <TextOutput text={tbText} className="text-xs opacity-90" />
         </div>
       );
     }
 
     if (out.output_type === 'display_data' || out.output_type === 'execute_result') {
       const data = out.data || {};
-      const rawHtml = data['text/html'] ? String(data['text/html']) : '';
+      const rawHtml = rawHtmlForMemo;
 
       // Skip standalone RequireJS loader script block emitted by Plotly's legacy notebook renderer
       if (
@@ -439,19 +500,32 @@ const OutputItem = React.memo(
         return null;
       }
 
-      const plotlySpec =
-        data['application/vnd.plotly.v1+json'] ||
-        (rawHtml ? extractPlotlySpecFromHtml(rawHtml) : null);
-
       const effectiveHtml =
         showingExpanded && expandedData?.html ? expandedData.html : rawHtml;
-      const rawPlain = data['text/plain'] ? String(data['text/plain']) : '';
+      const plain = data['text/plain'];
+      const rawPlain = Array.isArray(plain) ? plain.join('') : String(plain ?? '');
       const effectivePlain =
         showingExpanded && expandedData?.text ? expandedData.text : rawPlain;
       const plainHasEllipsis = /\.\.\.|…/.test(rawPlain);
 
+      const canToggle = typeof plain !== 'undefined' && (preview || /<table[\s>]/i.test(effectiveHtml)) &&
+        !plotlySpec && !data['image/png'] && !data['image/jpeg'] && !data['image/svg+xml'];
+      const structured = canToggle && preview && !original;
+      const raw = canToggle && original;
+      const toggleLabel = original ? 'Ver formatado' : 'Ver texto original';
+      const formatAction = canToggle && (
+        <button type="button" className="sat-output-action" title={toggleLabel}
+          aria-label={toggleLabel} aria-pressed={original} onClick={() => setOriginal(!original)}>
+          {original ? <Table2 size={14} /> : <FileText size={14} />}
+        </button>
+      );
       return (
         <div className="overflow-x-auto space-y-2">
+          {raw && <section className="rounded border border-[var(--sat-border)]">
+            <header className="sat-preview-header"><strong>Texto original</strong>{formatAction}</header>
+            <div className="px-2 py-1"><TextOutput text={rawPlain} /></div>
+          </section>}
+          {structured && <StructuredOutput node={preview} formatAction={formatAction} />}
           {plotlySpec && (
             <PlotlyOutputView spec={plotlySpec} outputLimited={outputLimited} />
           )}
@@ -477,16 +551,15 @@ const OutputItem = React.memo(
               src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(
                 String(data['image/svg+xml'])
               )}`}
-              svgHtml={DOMPurify.sanitize(String(data['image/svg+xml']), {
-                USE_PROFILES: { svg: true, svgFilters: true },
-              })}
+              svgHtml={sanitizedSvgHtml}
               ext="svg"
               alt="SVG output"
             />
           )}
 
-          {!plotlySpec && effectiveHtml && (
+          {!raw && !structured && !plotlySpec && effectiveHtml && (
             <TableOutputView
+              formatAction={formatAction}
               rawHtml={effectiveHtml}
               outputLimited={outputLimited}
               onExpandTruncated={handleExpandFromKernel}
@@ -495,7 +568,7 @@ const OutputItem = React.memo(
             />
           )}
 
-          {!plotlySpec &&
+          {!raw && !structured && !plotlySpec &&
             !effectiveHtml &&
             !data['image/png'] &&
             !data['image/jpeg'] &&
@@ -541,9 +614,7 @@ const OutputItem = React.memo(
                     </button>
                   </div>
                 )}
-                <pre className="m-0 font-mono text-[13px] leading-relaxed whitespace-pre-wrap break-words">
-                  {effectivePlain}
-                </pre>
+                <TextOutput text={effectivePlain} />
               </div>
             )}
         </div>

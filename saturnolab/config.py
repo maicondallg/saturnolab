@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,8 @@ VALID_THEMES = {
     "dark",
     "light",
 }
+
+_CODEX_STATUS_TTL_SEC = 30.0
 
 
 class ProviderSettings(BaseModel):
@@ -58,12 +62,17 @@ class SaturnoConfig(BaseModel):
     sidebar_width: int = 280
     show_line_numbers: bool = True
     auto_scroll_on_run: bool = True
+    output_format: str = "formatted"
+    output_height: int = 256
     output_display: str = "expanded"
     show_modified_time: bool = True
     confirm_kernel_restart: bool = False
     auto_save: bool = True
     auto_save_delay: int = 2000
     editor_font_size: int = 14
+    show_minimap: bool = True
+    minimap_width: int = 116
+    minimap_show_outputs: bool = True
     table_output: TableOutputSettings = Field(default_factory=TableOutputSettings)
     providers: dict[str, ProviderSettings] = Field(
         default_factory=lambda: {
@@ -94,9 +103,11 @@ class SaturnoConfig(BaseModel):
 
 class ConfigManager:
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._migrate_legacy_if_needed()
         self._config = self._load()
         self._workspace_path = self._resolve_initial_workspace()
+        self._codex_status_cache: tuple[float, dict[str, bool]] | None = None
 
     def _migrate_legacy_if_needed(self) -> None:
         if not CONFIG_FILE.exists() and LEGACY_CONFIG_FILE.exists():
@@ -134,22 +145,23 @@ class ConfigManager:
         return cfg
 
     def save(self) -> None:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(self._config.model_dump(), indent=2, ensure_ascii=False)
-        fd, tmp_name = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=str(CONFIG_DIR))
-        tmp_path = Path(tmp_name)
-        try:
-            if os.name != "nt":
-                try:
-                    os.fchmod(fd, 0o600)
-                except OSError:
-                    pass
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-            os.replace(tmp_path, CONFIG_FILE)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        with self._lock:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(self._config.model_dump(), indent=2, ensure_ascii=False)
+            fd, tmp_name = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=str(CONFIG_DIR))
+            tmp_path = Path(tmp_name)
+            try:
+                if os.name != "nt":
+                    try:
+                        os.fchmod(fd, 0o600)
+                    except OSError:
+                        pass
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                os.replace(tmp_path, CONFIG_FILE)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
     @property
     def config(self) -> SaturnoConfig:
@@ -168,6 +180,10 @@ class ConfigManager:
         return target
 
     def update_settings(self, patch: dict[str, Any]) -> SaturnoConfig:
+        with self._lock:
+            return self._update_settings_locked(patch)
+
+    def _update_settings_locked(self, patch: dict[str, Any]) -> SaturnoConfig:
         if "active_provider" in patch and patch["active_provider"] in VALID_PROVIDERS:
             self._config.active_provider = str(patch["active_provider"])
         if "theme" in patch and patch["theme"] in VALID_THEMES:
@@ -187,6 +203,10 @@ class ConfigManager:
             self._config.sidebar_width = max(180, min(640, int(patch["sidebar_width"])))
         if "show_line_numbers" in patch:
             self._config.show_line_numbers = bool(patch["show_line_numbers"])
+        if patch.get("output_format") in ("formatted", "original"):
+            self._config.output_format = patch["output_format"]
+        if isinstance(patch.get("output_height"), (int, float)) and not isinstance(patch.get("output_height"), bool):
+            self._config.output_height = max(80, min(1600, int(patch["output_height"])))
         if patch.get("output_display") in ("expanded", "limited", "collapsed"):
             self._config.output_display = patch["output_display"]
         if "auto_scroll_on_run" in patch:
@@ -201,6 +221,14 @@ class ConfigManager:
             self._config.auto_save_delay = max(500, min(60000, int(patch["auto_save_delay"])))
         if "editor_font_size" in patch and isinstance(patch["editor_font_size"], (int, float)):
             self._config.editor_font_size = max(11, min(22, int(patch["editor_font_size"])))
+        if "show_minimap" in patch:
+            self._config.show_minimap = bool(patch["show_minimap"])
+        if isinstance(patch.get("minimap_width"), (int, float)) and not isinstance(
+            patch.get("minimap_width"), bool
+        ):
+            self._config.minimap_width = max(72, min(200, int(patch["minimap_width"])))
+        if "minimap_show_outputs" in patch:
+            self._config.minimap_show_outputs = bool(patch["minimap_show_outputs"])
         if "table_output" in patch and isinstance(patch["table_output"], dict):
             tbl = patch["table_output"]
             cur = self._config.table_output
@@ -234,6 +262,7 @@ class ConfigManager:
                     if k in updated_dict and v is not None:
                         updated_dict[k] = v
                 self._config.providers[prov_name] = ProviderSettings(**updated_dict)
+            self._codex_status_cache = None
         self.save()
         return self._config
 
@@ -263,30 +292,41 @@ class ConfigManager:
             return str(local_bin)
         return None
 
-    def public_dict(self) -> dict[str, Any]:
-        data = self._config.model_dump()
+    def _get_codex_status(self) -> dict[str, bool]:
+        now = time.monotonic()
+        cached = self._codex_status_cache
+        if cached is not None and (now - cached[0]) < _CODEX_STATUS_TTL_SEC:
+            return cached[1]
         codex_bin = self.resolve_codex_binary()
         npx_bin = shutil.which("npx")
         codex_auth_exists = (Path.home() / ".codex" / "auth.json").exists()
-
-        providers_out: dict[str, Any] = {}
-        for name, p in data["providers"].items():
-            resolved_key = self.resolve_api_key(name)
-            providers_out[name] = {
-                **p,
-                "api_key": "********" if p.get("api_key") else "",
-                "has_key": bool(resolved_key),
-            }
-        return {
-            **data,
-            "workspace_dir": str(self.get_workspace_path()),
-            "providers": providers_out,
-            "codex_status": {
-                "cli_installed": bool(codex_bin),
-                "auth_found": codex_auth_exists,
-                "sdk_ready": bool(codex_bin or npx_bin),
-            },
+        status = {
+            "cli_installed": bool(codex_bin),
+            "auth_found": codex_auth_exists,
+            "sdk_ready": bool(codex_bin or npx_bin),
         }
+        self._codex_status_cache = (now, status)
+        return status
+
+    def public_dict(self) -> dict[str, Any]:
+        with self._lock:
+            data = self._config.model_dump()
+            codex_status = self._get_codex_status()
+
+            providers_out: dict[str, Any] = {}
+            for name, p in data["providers"].items():
+                resolved_key = self.resolve_api_key(name)
+                providers_out[name] = {
+                    **p,
+                    "api_key": "********" if p.get("api_key") else "",
+                    "has_key": bool(resolved_key),
+                }
+            return {
+                **data,
+                "workspace_dir": str(self.get_workspace_path()),
+                "providers": providers_out,
+                "codex_status": codex_status,
+            }
 
 
 config_manager = ConfigManager()

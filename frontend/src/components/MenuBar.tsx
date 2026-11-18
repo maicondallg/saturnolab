@@ -4,15 +4,36 @@ import { ChevronDown, FolderOpen, Menu } from 'lucide-react';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 
 export const MenuBar: React.FC = React.memo(() => {
-  const s = useSaturnoStore(useShallow(s => ({
-    initialized: s.initialized, workspaceRoot: s.workspaceRoot, leftSidebar: s.leftSidebar, sidebarPosition: s.sidebarPosition,
-    notebookLayout: s.notebookLayout, showLineNumbers: s.showLineNumbers, autoSave: s.autoSave,
-    activeTab: s.tabs.find(t => t.id === s.activeTabId && (t.kind === 'launcher' || !t.loading)), activePaneId: s.activePaneId,
-  })));
+  const s = useSaturnoStore(useShallow((state) => {
+    const activeTab = state.tabs.find(
+      (t) => t.id === state.activeTabId && (t.kind === 'launcher' || !t.loading)
+    );
+    const nb = activeTab?.kind === 'notebook' ? activeTab : undefined;
+    const activeCell = nb?.cells.find((c) => c.id === nb.activeCellId);
+    return {
+      initialized: state.initialized,
+      workspaceRoot: state.workspaceRoot,
+      leftSidebar: state.leftSidebar,
+      sidebarPosition: state.sidebarPosition,
+      notebookLayout: state.notebookLayout,
+      showLineNumbers: state.showLineNumbers,
+      showMinimap: state.showMinimap,
+      autoSave: state.autoSave,
+      activePaneId: state.activePaneId,
+      activeTabId: activeTab?.id,
+      activeTabKind: activeTab?.kind,
+      activeCellId: activeCell?.id,
+      hasOutput: Boolean(activeCell?.cell_type === 'code' && activeCell.outputs.length > 0),
+      hasAnyOutput: Boolean(nb?.cells.some((c) => c.outputs.length > 0)),
+      hasRedoDeleted: Boolean(nb?.redoDeletedCellIds?.length),
+      kernelBusy: nb?.kernelStatus === 'busy',
+    };
+  }));
   const menu = useRef<HTMLDetailsElement>(null);
   const actions = useSaturnoStore.getState();
-  const notebook = s.activeTab?.kind === 'notebook' ? s.activeTab : undefined;
-  const cell = notebook?.cells.find(c => c.id === notebook.activeCellId);
+  const isNotebook = s.activeTabKind === 'notebook';
+  const hasCell = Boolean(s.activeCellId);
+  const canSaveOrSplit = Boolean(s.activeTabKind && s.activeTabKind !== 'launcher');
   useEffect(() => {
     const close = (e: PointerEvent) => {
       if (!menu.current?.contains(e.target as Node) && menu.current) menu.current.open = false;
@@ -35,7 +56,6 @@ export const MenuBar: React.FC = React.memo(() => {
   );
   const separator = <hr className="my-1" style={{ borderColor: 'var(--sat-border)' }} />;
   const group = (label: string) => <div className="px-3 pt-2 pb-1 text-xs" style={{ color: 'var(--sat-text-muted)' }}>{label}</div>;
-  const hasOutput = cell?.cell_type === 'code' && cell.outputs.length > 0;
   return <header className="relative h-10 pr-3 flex items-center gap-1 border-b shrink-0 select-none"
     style={{ background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }}>
     <details ref={menu} className="contents" data-app-menu>
@@ -51,41 +71,43 @@ export const MenuBar: React.FC = React.memo(() => {
           {item('Abrir Launcher', () => actions.openLauncher())}
           {item('Abrir pasta…', () => actions.setShowFolderModal(true))}
           {separator}
-          {item('Salvar', () => { void actions.saveActiveTab(); }, !s.activeTab || s.activeTab.kind === 'launcher', 'Ctrl+S')}
+          {item('Salvar', () => { void actions.saveActiveTab(); }, !canSaveOrSplit, 'Ctrl+S')}
           {item(s.autoSave ? '✓ Salvamento automático' : 'Salvamento automático', () => actions.setAutoSave(!s.autoSave))}
         </div></div>
         <div className="app-submenu"><button type="button" className="app-menu-heading">Editar</button><div className="app-submenu-items">
           {group('Células')}
-          {item('Recortar célula', () => actions.cutCell(cell?.id), !cell, 'X')}
-          {item('Copiar célula', () => actions.copyCell(cell?.id), !cell, 'C')}
-          {item('Colar célula abaixo', () => actions.pasteCellBelow(cell?.id), !notebook, 'V')}
-          {item('Restaurar célula excluída', () => actions.undoDeleteCell(), !notebook, 'Z')}
+          {item('Recortar célula', () => actions.cutCell(s.activeCellId), !hasCell, 'X')}
+          {item('Copiar célula', () => actions.copyCell(s.activeCellId), !hasCell, 'C')}
+          {item('Colar célula abaixo', () => actions.pasteCellBelow(s.activeCellId), !isNotebook, 'V')}
+          {item('Refazer exclusão de célula', () => actions.redoDeleteCell(), !s.hasRedoDeleted, 'Shift+Z')}
+          {item('Restaurar célula excluída', () => actions.undoDeleteCell(), !isNotebook, 'Z')}
           {separator}
-          {item('Limpar saída da célula', () => { if (cell) actions.clearCellOutputs(cell.id); }, !hasOutput)}
-          {item('Limpar todas as saídas', () => actions.clearAllOutputs(), !notebook || !notebook.cells.some(c => c.outputs.length > 0))}
+          {item('Limpar saída da célula', () => { if (s.activeCellId) actions.clearCellOutputs(s.activeCellId); }, !s.hasOutput)}
+          {item('Limpar todas as saídas', () => actions.clearAllOutputs(), !isNotebook || !s.hasAnyOutput)}
           {separator}
-          {item('Editar célula com IA…', () => { if (cell) { actions.selectCell(cell.id, 'edit'); actions.openInlineAI(cell.id, null); } }, !cell, 'Ctrl+I')}
+          {item('Editar célula com IA…', () => { if (s.activeCellId) { actions.selectCell(s.activeCellId, 'edit'); actions.openInlineAI(s.activeCellId, null); } }, !hasCell, 'Ctrl+I')}
         </div></div>
         <div className="app-submenu"><button type="button" className="app-menu-heading">Exibir</button><div className="app-submenu-items">
           {group('Painéis')}
           {item(s.leftSidebar ? 'Ocultar painel lateral' : 'Mostrar painel lateral', () => actions.setLeftSidebar(s.leftSidebar ? null : 'files'), false, 'Ctrl+B')}
           {item(s.sidebarPosition === 'left' ? 'Painel lateral à direita' : 'Painel lateral à esquerda', () => actions.toggleSidebarPosition())}
-          {item('Dividir editor à direita', () => { if (s.activeTab) actions.splitTab(s.activeTab.id, s.activePaneId, 'right'); }, !s.activeTab || s.activeTab.kind === 'launcher')}
+          {item('Dividir editor à direita', () => { if (s.activeTabId) actions.splitTab(s.activeTabId, s.activePaneId, 'right'); }, !canSaveOrSplit)}
           {separator}
           {group('Editor')}
-          {item(s.showLineNumbers ? 'Ocultar números de linha' : 'Mostrar números de linha', () => actions.toggleLineNumbers(), !s.activeTab || s.activeTab.kind === 'launcher')}
+          {item(s.showLineNumbers ? 'Ocultar números de linha' : 'Mostrar números de linha', () => actions.toggleLineNumbers(), !canSaveOrSplit)}
+          {item(s.showMinimap ? 'Ocultar minimapa' : 'Mostrar minimapa', () => actions.toggleMinimap(), !canSaveOrSplit)}
           {separator}
           {group('Notebook')}
-          {item(s.notebookLayout === 'centered' ? 'Usar largura total' : 'Centralizar notebook', () => actions.toggleNotebookLayout(), !notebook)}
-          {item('Ocultar / mostrar saída da célula', () => actions.toggleCellOutputCollapse(cell?.id), !hasOutput, 'O')}
+          {item(s.notebookLayout === 'centered' ? 'Usar largura total' : 'Centralizar notebook', () => actions.toggleNotebookLayout(), !isNotebook)}
+          {item('Ocultar / mostrar saída da célula', () => actions.toggleCellOutputCollapse(s.activeCellId), !s.hasOutput, 'O')}
         </div></div>
         <div className="app-submenu"><button type="button" className="app-menu-heading">Executar</button><div className="app-submenu-items">
-          {item('Executar célula selecionada', () => { if (cell) void actions.runCell(cell.id, 'none'); }, !cell, 'Ctrl+Enter')}
-          {item('Executar todas as células', () => { void actions.runAllCells(); }, !notebook)}
+          {item('Executar célula selecionada', () => { if (s.activeCellId) void actions.runCell(s.activeCellId, 'none'); }, !hasCell, 'Ctrl+Enter')}
+          {item('Executar todas as células', () => { void actions.runAllCells(); }, !isNotebook)}
           {separator}
           {group('Kernel')}
-          {item('Interromper execução', () => { void actions.interruptKernel(); }, !notebook || notebook.kernelStatus !== 'busy')}
-          {item('Reiniciar kernel', () => { void actions.restartKernel(false); }, !notebook)}
+          {item('Interromper execução', () => { void actions.interruptKernel(); }, !isNotebook || !s.kernelBusy)}
+          {item('Reiniciar kernel', () => { void actions.restartKernel(false); }, !isNotebook)}
         </div></div>
         <div className="app-submenu"><button type="button" className="app-menu-heading">Configurações</button><div className="app-submenu-items">
           {item('Aparência e layout…', () => actions.openSettings('appearance'))}

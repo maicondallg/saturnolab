@@ -1,4 +1,5 @@
 import {
+  CellOutput,
   FileEntry,
   KernelCompleteResponse,
   KernelExpandOutputResponse,
@@ -62,6 +63,9 @@ export const api = {
       modified?: string;
       kernel_status: any;
       variables: any[];
+      active_cell_id?: string | null;
+      active_execution_count?: number | null;
+      active_outputs?: CellOutput[];
     }>(`/api/fs/notebook?path=${encodeURIComponent(path)}`),
   saveNotebook: (path: string, cells: any[], metadata?: Record<string, any>) =>
     apiFetch<{ saved: boolean; path: string; modified: string }>('/api/fs/notebook/save', {
@@ -103,7 +107,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path, content }),
     }),
-    createFile: (folder = '', name = 'script.py') =>
+  createFile: (folder = '', name = 'script.py') =>
     apiFetch<{ path: string; name: string; content: string; truncated: boolean; modified?: string }>(
       '/api/fs/file/create',
       {

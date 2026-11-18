@@ -1,18 +1,24 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect,
+  useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Annotation, EditorState, Compartment, Prec } from '@codemirror/state';
 import {
   EditorView,
+  Panel,
+  Rect,
+  ViewUpdate,
   keymap,
   lineNumbers,
   highlightActiveLine,
   drawSelection,
   placeholder as cmPlaceholder,
+  tooltips,
 } from '@codemirror/view';
 import {
   defaultKeymap,
   history,
   historyKeymap,
+  redo,
   indentMore,
   indentLess,
 } from '@codemirror/commands';
@@ -27,6 +33,8 @@ import { python } from '@codemirror/lang-python';
 import { markdownLanguage, markdownKeymap } from '@codemirror/lang-markdown';
 import {
   closeBrackets,
+  insertBracket,
+  closeBracketsKeymap,
   autocompletion,
   startCompletion,
   acceptCompletion,
@@ -37,15 +45,25 @@ import {
   Completion,
 } from '@codemirror/autocomplete';
 import {
+  SearchQuery,
   search,
   searchKeymap,
   highlightSelectionMatches,
   openSearchPanel,
   closeSearchPanel,
   searchPanelOpen,
+  getSearchQuery,
+  setSearchQuery,
+  findNext,
+  findPrevious,
+  selectMatches,
+  replaceNext,
+  replaceAll,
 } from '@codemirror/search';
 import { BookOpen, Loader2, X } from 'lucide-react';
 import { api } from '../services/api';
+import { registerEditorFlusher } from '../services/editorViews';
+import { findNotebookTabForCell } from '../store/useSaturnoStore';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 import { KernelInspectResponse } from '../types/notebook';
 
@@ -55,22 +73,751 @@ function createMarkdownExtension() {
 
 const externalSyncAnnotation = Annotation.define<boolean>();
 
-const saturnoPtPhrases = EditorState.phrases.of({
-  Find: 'Localizar...',
-  Replace: 'Substituir por...',
-  next: 'Próximo',
-  previous: 'Anterior',
-  all: 'Todos',
-  'match case': 'Maiúsc./minúsc.',
-  'by word': 'Palavra inteira',
-  regexp: 'Regex',
-  literal: 'Literal',
-  replace: 'Substituir',
-  'replace all': 'Substituir tudo',
-  close: 'Fechar (Esc)',
-  'Go to line': 'Ir para a linha',
-  go: 'Ir',
-});
+let sharedTooltipHost: HTMLElement | null = null;
+
+function getSharedTooltipHost(): HTMLElement | undefined {
+  if (typeof document === 'undefined' || !document.body) return undefined;
+  if (sharedTooltipHost && sharedTooltipHost.isConnected) {
+    return sharedTooltipHost;
+  }
+  const existing = document.getElementById('saturno-cm-tooltips');
+  if (existing) {
+    sharedTooltipHost = existing;
+    return existing;
+  }
+  const host = document.createElement('div');
+  host.id = 'saturno-cm-tooltips';
+  host.setAttribute('data-sat-cm-tooltips', 'true');
+  host.style.position = 'fixed';
+  host.style.top = '0';
+  host.style.left = '0';
+  host.style.width = '0';
+  host.style.height = '0';
+  host.style.zIndex = '55';
+  document.body.appendChild(host);
+  sharedTooltipHost = host;
+  return host;
+}
+
+function getEditorTooltipSpace(view: EditorView): Rect {
+  const scrollHost = view.dom.closest(
+    '[data-notebook-scroll], [data-editor-scroll], [data-tab-panel]'
+  );
+  if (scrollHost) {
+    const r = scrollHost.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) {
+      return {
+        top: r.top + 4,
+        left: r.left + 4,
+        bottom: r.bottom - 4,
+        right: r.right - 4,
+      };
+    }
+  }
+  return {
+    top: 4,
+    left: 4,
+    bottom: window.innerHeight - 4,
+    right: window.innerWidth - 4,
+  };
+}
+
+const LAZY_MOUNT_MARGIN_PX = 600;
+const MAX_UNVIRTUALIZED_CELL_LINES = 500;
+const MAX_UNVIRTUALIZED_CELL_CHARS = 50_000;
+
+interface InternalEditorView {
+  measure?: (flush?: boolean) => void;
+  viewState?: {
+    printing: boolean;
+    mustMeasureContent: boolean | 'refresh';
+  };
+}
+
+function shouldRenderFullCellViewport(fullHeight: boolean, state: EditorState): boolean {
+  return (
+    !fullHeight &&
+    state.doc.lines <= MAX_UNVIRTUALIZED_CELL_LINES &&
+    state.doc.length <= MAX_UNVIRTUALIZED_CELL_CHARS
+  );
+}
+
+interface LazyObserverPool {
+  observer: IntersectionObserver;
+  callbacks: Map<Element, () => void>;
+  paused: boolean;
+  intersecting: Set<Element>;
+  flushRaf: number | null;
+}
+
+const lazyObserverPools = new WeakMap<Element, LazyObserverPool>();
+let windowLazyObserverPool: LazyObserverPool | null = null;
+
+function mountLazyTarget(pool: LazyObserverPool, target: Element): void {
+  const cb = pool.callbacks.get(target);
+  if (!cb) return;
+  pool.callbacks.delete(target);
+  pool.intersecting.delete(target);
+  pool.observer.unobserve(target);
+  cb();
+}
+
+/**
+ * Temporarily pauses lazy CodeMirror mounting for a scroll container (e.g., while
+ * rapidly scrubbing the minimap viewport lens) so swept-past offscreen cells do not
+ * mount synchronously and stall the main thread. When resumed, visible cells mount
+ * immediately and offscreen margin cells flush gently across animation frames.
+ */
+export function setLazyMountPaused(scrollRoot: Element | null, paused: boolean): void {
+  const pool = scrollRoot ? lazyObserverPools.get(scrollRoot) ?? null : windowLazyObserverPool;
+  if (!pool) return;
+  pool.paused = paused;
+
+  if (paused) {
+    if (pool.flushRaf !== null) {
+      window.cancelAnimationFrame(pool.flushRaf);
+      pool.flushRaf = null;
+    }
+    return;
+  }
+
+  if (pool.intersecting.size === 0) return;
+
+  const vpRect = scrollRoot?.getBoundingClientRect();
+  const vpTop = vpRect?.top ?? 0;
+  const vpBottom = vpRect?.bottom ?? window.innerHeight;
+  const visibleNow: Element[] = [];
+  const marginQueue: Element[] = [];
+
+  for (const el of Array.from(pool.intersecting)) {
+    pool.intersecting.delete(el);
+    if (!el.isConnected || !pool.callbacks.has(el)) continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.height <= 0) continue;
+    if (rect.bottom >= vpTop && rect.top <= vpBottom) {
+      visibleNow.push(el);
+    } else if (
+      rect.bottom >= vpTop - LAZY_MOUNT_MARGIN_PX &&
+      rect.top <= vpBottom + LAZY_MOUNT_MARGIN_PX
+    ) {
+      marginQueue.push(el);
+    }
+  }
+
+  for (const el of visibleNow) {
+    mountLazyTarget(pool, el);
+  }
+
+  if (marginQueue.length === 0) return;
+
+  const flushBatch = () => {
+    pool.flushRaf = null;
+    if (pool.paused) return;
+    let count = 0;
+    while (marginQueue.length > 0 && count < 2) {
+      const el = marginQueue.shift()!;
+      if (!el.isConnected || !pool.callbacks.has(el)) continue;
+      mountLazyTarget(pool, el);
+      count++;
+    }
+    if (marginQueue.length > 0 && !pool.paused) {
+      pool.flushRaf = window.requestAnimationFrame(flushBatch);
+    }
+  };
+
+  if (pool.flushRaf !== null) {
+    window.cancelAnimationFrame(pool.flushRaf);
+  }
+  pool.flushRaf = window.requestAnimationFrame(flushBatch);
+}
+
+function observeLazyMount(
+  element: Element,
+  scrollRoot: Element | null,
+  onEnter: () => void
+): () => void {
+  let pool = scrollRoot ? lazyObserverPools.get(scrollRoot) ?? null : windowLazyObserverPool;
+  if (!pool) {
+    const callbacks = new Map<Element, () => void>();
+    const intersecting = new Set<Element>();
+    const createdPool: LazyObserverPool = {
+      observer: null as unknown as IntersectionObserver,
+      callbacks,
+      paused: false,
+      intersecting,
+      flushRaf: null,
+    };
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (createdPool.paused) {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              createdPool.intersecting.add(entry.target);
+            } else {
+              createdPool.intersecting.delete(entry.target);
+            }
+          }
+          return;
+        }
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          mountLazyTarget(createdPool, entry.target);
+        }
+      },
+      { root: scrollRoot, rootMargin: `${LAZY_MOUNT_MARGIN_PX}px 0px` }
+    );
+    createdPool.observer = observer;
+    pool = createdPool;
+    if (scrollRoot) {
+      lazyObserverPools.set(scrollRoot, pool);
+    } else {
+      windowLazyObserverPool = pool;
+    }
+  }
+  const activePool = pool;
+  activePool.callbacks.set(element, onEnter);
+  activePool.observer.observe(element);
+  return () => {
+    activePool.intersecting.delete(element);
+    if (activePool.callbacks.delete(element)) {
+      activePool.observer.unobserve(element);
+    }
+  };
+}
+
+function syncCellEditorLayout(
+  view: EditorView,
+  fullHeight: boolean,
+  forceRefresh = false
+): void {
+  if (!view.dom.isConnected) return;
+  const internal = view as unknown as InternalEditorView;
+  const renderFull = shouldRenderFullCellViewport(fullHeight, view.state);
+
+  if (internal.viewState) {
+    internal.viewState.printing = renderFull;
+    if (forceRefresh) {
+      internal.viewState.mustMeasureContent = 'refresh';
+    }
+  }
+
+  if (view.dom.getClientRects().length === 0) return;
+
+  if (renderFull) {
+    internal.measure?.(false);
+  } else if (!fullHeight && internal.viewState && internal.measure) {
+    // Giant cell (>500 lines): calibrate HeightOracle & visible gutter lines offscreen
+    // without forcing CodeMirror to render thousands of lines at once.
+    const contentEl = view.contentDOM;
+    const prevMaxH = contentEl.style.maxHeight;
+    const prevOverflow = contentEl.style.overflow;
+    contentEl.style.maxHeight = '1200px';
+    contentEl.style.overflow = 'hidden';
+    internal.viewState.printing = true;
+    internal.viewState.mustMeasureContent = 'refresh';
+    try {
+      internal.measure(false);
+    } finally {
+      internal.viewState.printing = false;
+      contentEl.style.maxHeight = prevMaxH;
+      contentEl.style.overflow = prevOverflow;
+    }
+  }
+}
+
+const pendingPrePaintSyncs = new Map<
+  EditorView,
+  { fullHeight: boolean; forceRefresh: boolean }
+>();
+let prePaintFlushQueued = false;
+
+function schedulePrePaintCellSync(
+  view: EditorView,
+  fullHeight: boolean,
+  forceRefresh = false
+): void {
+  const internal = view as unknown as InternalEditorView;
+  if (internal.viewState) {
+    internal.viewState.printing = shouldRenderFullCellViewport(fullHeight, view.state);
+    if (forceRefresh) {
+      internal.viewState.mustMeasureContent = 'refresh';
+    }
+  }
+
+  const prev = pendingPrePaintSyncs.get(view);
+  pendingPrePaintSyncs.set(view, {
+    fullHeight,
+    forceRefresh: Boolean(prev?.forceRefresh || forceRefresh),
+  });
+
+  if (!prePaintFlushQueued) {
+    prePaintFlushQueued = true;
+    queueMicrotask(() => {
+      prePaintFlushQueued = false;
+      const batch = Array.from(pendingPrePaintSyncs.entries());
+      pendingPrePaintSyncs.clear();
+      for (const [v, opts] of batch) {
+        syncCellEditorLayout(v, opts.fullHeight, opts.forceRefresh);
+      }
+    });
+  }
+}
+
+interface TrackedCellResize {
+  view: EditorView;
+  getFullHeight: () => boolean;
+  lastWidth: number;
+}
+
+const resizeTrackedCells = new Map<Element, TrackedCellResize>();
+let sharedCellResizeObserver: ResizeObserver | null = null;
+let printRestoreInstalled = false;
+
+function observeCellContainerResize(
+  container: Element,
+  view: EditorView,
+  getFullHeight: () => boolean
+): () => void {
+  if (!printRestoreInstalled && typeof window !== 'undefined') {
+    printRestoreInstalled = true;
+    window.addEventListener('afterprint', () => {
+      window.setTimeout(() => {
+        for (const item of resizeTrackedCells.values()) {
+          const internal = item.view as unknown as InternalEditorView;
+          if (internal.viewState) {
+            internal.viewState.printing = shouldRenderFullCellViewport(
+              item.getFullHeight(),
+              item.view.state
+            );
+          }
+        }
+      }, 550);
+    });
+  }
+
+  if (typeof ResizeObserver === 'undefined') {
+    return () => {};
+  }
+
+  if (!sharedCellResizeObserver) {
+    sharedCellResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const tracked = resizeTrackedCells.get(entry.target);
+        if (!tracked) continue;
+        const width = entry.contentRect.width;
+        if (tracked.lastWidth < 0) {
+          tracked.lastWidth = width;
+          continue;
+        }
+        if (Math.abs(width - tracked.lastWidth) <= 0.5) continue;
+        const wasHidden = tracked.lastWidth <= 0;
+        tracked.lastWidth = width;
+        if (width <= 0) continue;
+        if (wasHidden) {
+          schedulePrePaintCellSync(tracked.view, tracked.getFullHeight(), true);
+        } else {
+          tracked.view.requestMeasure();
+        }
+      }
+    });
+  }
+
+  resizeTrackedCells.set(container, {
+    view,
+    getFullHeight,
+    lastWidth: -1,
+  });
+  sharedCellResizeObserver.observe(container);
+
+  return () => {
+    resizeTrackedCells.delete(container);
+    sharedCellResizeObserver?.unobserve(container);
+  };
+}
+
+function createSaturnoSearchPanel(view: EditorView): Panel {
+  let query = getSearchQuery(view.state);
+  let caseSensitive = query.caseSensitive;
+  let wholeWord = query.wholeWord;
+  let regexp = query.regexp;
+  let replaceVisible = true;
+
+  const dom = document.createElement('div');
+  dom.className = 'cm-search sat-cm-search-panel';
+  dom.setAttribute('data-sat-search-panel', 'true');
+
+  // Left chevron toggle for Replace row
+  const toggleReplaceBtn = document.createElement('button');
+  toggleReplaceBtn.type = 'button';
+  toggleReplaceBtn.className = 'sat-cm-search-chevron';
+  toggleReplaceBtn.title = 'Mostrar / ocultar Substituir';
+  toggleReplaceBtn.setAttribute('aria-label', 'Mostrar ou ocultar Substituir');
+  toggleReplaceBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+
+  const rowsWrap = document.createElement('div');
+  rowsWrap.className = 'sat-cm-search-rows';
+
+  // --- ROW 1: FIND ---
+  const findRow = document.createElement('div');
+  findRow.className = 'sat-cm-search-row';
+
+  const findBox = document.createElement('div');
+  findBox.className = 'sat-cm-input-group';
+
+  const findIcon = document.createElement('span');
+  findIcon.className = 'sat-cm-input-icon';
+  findIcon.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`;
+
+  const searchInput = document.createElement('input');
+  searchInput.type = 'text';
+  searchInput.name = 'search';
+  searchInput.setAttribute('main-field', 'true');
+  searchInput.placeholder = 'Localizar na célula...';
+  searchInput.value = query.search;
+  searchInput.className = 'cm-textfield sat-cm-input';
+  searchInput.autocomplete = 'off';
+  searchInput.spellcheck = false;
+
+  const togglesWrap = document.createElement('div');
+  togglesWrap.className = 'sat-cm-toggles';
+
+  const makeTogglePill = (
+    label: string,
+    title: string,
+    isActive: () => boolean,
+    onToggle: () => void
+  ) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `sat-cm-toggle-pill ${isActive() ? 'is-active' : ''}`;
+    btn.textContent = label;
+    btn.title = title;
+    btn.setAttribute('aria-pressed', String(isActive()));
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      onToggle();
+      btn.classList.toggle('is-active', isActive());
+      btn.setAttribute('aria-pressed', String(isActive()));
+      commitQuery();
+      searchInput.focus();
+    });
+    return btn;
+  };
+
+  const caseBtn = makeTogglePill(
+    'Aa',
+    'Diferenciar maiúsculas e minúsculas',
+    () => caseSensitive,
+    () => {
+      caseSensitive = !caseSensitive;
+    }
+  );
+  const wordBtn = makeTogglePill(
+    'ab',
+    'Palavra inteira',
+    () => wholeWord,
+    () => {
+      wholeWord = !wholeWord;
+    }
+  );
+  const regexBtn = makeTogglePill(
+    '.*',
+    'Expressão regular (Regex)',
+    () => regexp,
+    () => {
+      regexp = !regexp;
+    }
+  );
+
+  togglesWrap.append(caseBtn, wordBtn, regexBtn);
+  findBox.append(findIcon, searchInput, togglesWrap);
+
+  const countBadge = document.createElement('span');
+  countBadge.className = 'sat-cm-match-count';
+  countBadge.textContent = '';
+
+  const navGroup = document.createElement('div');
+  navGroup.className = 'sat-cm-nav-group';
+
+  const prevBtn = document.createElement('button');
+  prevBtn.type = 'button';
+  prevBtn.name = 'prev';
+  prevBtn.className = 'cm-button sat-cm-icon-btn';
+  prevBtn.title = 'Ocorrência anterior (Shift+Enter)';
+  prevBtn.setAttribute('aria-label', 'Anterior');
+  prevBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>`;
+  prevBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    findPrevious(view);
+  });
+
+  const nextBtn = document.createElement('button');
+  nextBtn.type = 'button';
+  nextBtn.name = 'next';
+  nextBtn.className = 'cm-button sat-cm-icon-btn';
+  nextBtn.title = 'Próxima ocorrência (Enter)';
+  nextBtn.setAttribute('aria-label', 'Próximo');
+  nextBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>`;
+  nextBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    findNext(view);
+  });
+
+  const allBtn = document.createElement('button');
+  allBtn.type = 'button';
+  allBtn.name = 'select';
+  allBtn.className = 'cm-button sat-cm-action-btn';
+  allBtn.title = 'Selecionar todas as ocorrências';
+  allBtn.textContent = 'Todos';
+  allBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    selectMatches(view);
+  });
+
+  navGroup.append(prevBtn, nextBtn, allBtn);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.name = 'close';
+  closeBtn.className = 'sat-cm-close-btn';
+  closeBtn.title = 'Fechar busca (Esc)';
+  closeBtn.setAttribute('aria-label', 'Fechar');
+  closeBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+  closeBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeSearchPanel(view);
+    view.focus();
+  });
+
+  findRow.append(findBox, countBadge, navGroup, closeBtn);
+
+  // --- ROW 2: REPLACE ---
+  const replaceRow = document.createElement('div');
+  replaceRow.className = 'sat-cm-search-row sat-cm-replace-row';
+
+  const replaceBox = document.createElement('div');
+  replaceBox.className = 'sat-cm-input-group';
+
+  const replaceIcon = document.createElement('span');
+  replaceIcon.className = 'sat-cm-input-icon';
+  replaceIcon.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>`;
+
+  const replaceInput = document.createElement('input');
+  replaceInput.type = 'text';
+  replaceInput.name = 'replace';
+  replaceInput.placeholder = 'Substituir por...';
+  replaceInput.value = query.replace;
+  replaceInput.className = 'cm-textfield sat-cm-input';
+  replaceInput.autocomplete = 'off';
+  replaceInput.spellcheck = false;
+
+  replaceBox.append(replaceIcon, replaceInput);
+
+  const replaceActions = document.createElement('div');
+  replaceActions.className = 'sat-cm-replace-actions';
+
+  const runSmartReplaceNext = () => {
+    commitQuery();
+    const curQ = getSearchQuery(view.state);
+    if (!curQ.valid) return;
+    const sel = view.state.selection.main;
+    let selMatches = false;
+    if (!sel.empty) {
+      const cur = curQ.getCursor(view.state.doc, sel.from, sel.to);
+      const step = cur.next();
+      if (!step.done && step.value.from === sel.from && step.value.to === sel.to) {
+        selMatches = true;
+      }
+    }
+    if (!selMatches) {
+      findNext(view);
+    }
+    replaceNext(view);
+  };
+
+  const replaceBtn = document.createElement('button');
+  replaceBtn.type = 'button';
+  replaceBtn.name = 'replace';
+  replaceBtn.className = 'cm-button sat-cm-action-btn';
+  replaceBtn.title = 'Substituir ocorrência atual (Enter)';
+  replaceBtn.textContent = 'Substituir';
+  replaceBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    runSmartReplaceNext();
+  });
+
+  const replaceAllBtn = document.createElement('button');
+  replaceAllBtn.type = 'button';
+  replaceAllBtn.name = 'replaceAll';
+  replaceAllBtn.className = 'cm-button sat-cm-action-btn';
+  replaceAllBtn.title = 'Substituir todas as ocorrências na célula';
+  replaceAllBtn.textContent = 'Substituir tudo';
+  replaceAllBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    commitQuery();
+    replaceAll(view);
+  });
+
+  replaceActions.append(replaceBtn, replaceAllBtn);
+  replaceRow.append(replaceBox, replaceActions);
+
+  rowsWrap.append(findRow, replaceRow);
+  dom.append(toggleReplaceBtn, rowsWrap);
+
+  const updateReplaceVisibility = () => {
+    replaceRow.style.display = replaceVisible ? 'flex' : 'none';
+    toggleReplaceBtn.innerHTML = replaceVisible
+      ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`
+      : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+  };
+
+  toggleReplaceBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    replaceVisible = !replaceVisible;
+    updateReplaceVisibility();
+  });
+
+  const updateMatchCount = () => {
+    const q = getSearchQuery(view.state);
+    if (!q.search) {
+      countBadge.textContent = '';
+      countBadge.removeAttribute('data-empty');
+      return;
+    }
+    if (!q.valid) {
+      countBadge.textContent = 'Regex inválida';
+      countBadge.setAttribute('data-empty', 'true');
+      return;
+    }
+    try {
+      const cursor = q.getCursor(view.state.doc);
+      const sel = view.state.selection.main;
+      let total = 0;
+      let currentIdx = 0;
+      let item = cursor.next();
+      while (!item.done && total < 2000) {
+        total++;
+        const { from, to } = item.value;
+        if (currentIdx === 0 && from >= sel.from) {
+          currentIdx = total;
+        }
+        if (from === sel.from && to === sel.to) {
+          currentIdx = total;
+        }
+        item = cursor.next();
+      }
+      if (total === 0) {
+        countBadge.textContent = '0 resultados';
+        countBadge.setAttribute('data-empty', 'true');
+      } else {
+        if (currentIdx === 0) currentIdx = 1;
+        countBadge.textContent = `${currentIdx} de ${total}${total >= 2000 ? '+' : ''}`;
+        countBadge.removeAttribute('data-empty');
+      }
+    } catch {
+      countBadge.textContent = '';
+    }
+  };
+
+  const commitQuery = () => {
+    const nextQ = new SearchQuery({
+      search: searchInput.value,
+      replace: replaceInput.value,
+      caseSensitive,
+      wholeWord,
+      regexp,
+    });
+    if (!nextQ.eq(query)) {
+      query = nextQ;
+      view.dispatch({ effects: setSearchQuery.of(nextQ) });
+    }
+    updateMatchCount();
+  };
+
+  searchInput.addEventListener('input', commitQuery);
+  replaceInput.addEventListener('input', commitQuery);
+
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      commitQuery();
+      if (e.shiftKey) {
+        findPrevious(view);
+      } else {
+        findNext(view);
+      }
+      updateMatchCount();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSearchPanel(view);
+      view.focus();
+    }
+  });
+
+  replaceInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.ctrlKey || e.metaKey || e.altKey) {
+        commitQuery();
+        replaceAll(view);
+      } else {
+        runSmartReplaceNext();
+      }
+      updateMatchCount();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSearchPanel(view);
+      view.focus();
+    }
+  });
+
+  dom.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSearchPanel(view);
+      view.focus();
+    }
+  });
+
+  return {
+    dom,
+    top: true,
+    mount() {
+      searchInput.focus();
+      searchInput.select();
+      updateMatchCount();
+    },
+    update(update: ViewUpdate) {
+      for (const tr of update.transactions) {
+        for (const effect of tr.effects) {
+          if (effect.is(setSearchQuery)) {
+            query = effect.value;
+            if (searchInput.value !== query.search) {
+              searchInput.value = query.search;
+            }
+            if (replaceInput.value !== query.replace) {
+              replaceInput.value = query.replace;
+            }
+            caseSensitive = query.caseSensitive;
+            wholeWord = query.wholeWord;
+            regexp = query.regexp;
+            caseBtn.classList.toggle('is-active', caseSensitive);
+            wordBtn.classList.toggle('is-active', wholeWord);
+            regexBtn.classList.toggle('is-active', regexp);
+          }
+        }
+      }
+      if (update.docChanged || update.selectionSet || update.transactions.length > 0) {
+        updateMatchCount();
+      }
+    },
+  };
+}
 
 const PYTHON_KEYWORDS_AND_BUILTINS: { label: string; type: string; detail?: string }[] = [
   { label: 'import', type: 'keyword' },
@@ -153,7 +900,7 @@ const COMMON_DATAFRAME_METHODS: { label: string; type: string; detail: string }[
 
 function getNotebookContextForCell(cellId?: string) {
   const state = useSaturnoStore.getState();
-  const activeTab = state.tabs.find((t) => t.id === state.activeTabId);
+  const activeTab = findNotebookTabForCell(state.tabs, state.activeTabId, cellId);
   if (!activeTab || activeTab.kind !== 'notebook') {
     return { notebookPath: '', contextCode: '', variables: [] };
   }
@@ -270,6 +1017,7 @@ interface Props {
   language: 'python' | 'markdown';
   theme: 'light' | 'dark';
   showLineNumbers: boolean;
+  readOnly?: boolean;
   autoFocus?: boolean;
   fullHeight?: boolean;
   placeholder?: string;
@@ -279,6 +1027,7 @@ interface Props {
   onShiftEnter?: () => void;
   onCtrlEnter?: () => void;
   onAltEnter?: () => void;
+  onNavigate?: (down: boolean) => boolean;
   onMoveUp?: () => void;
   onMoveDown?: () => void;
   onToggleType?: () => void;
@@ -288,12 +1037,13 @@ interface Props {
   onTriggerAI?: (selection: { from: number; to: number; text: string } | null) => void;
 }
 
-export const CodeMirrorCellEditor: React.FC<Props> = ({
+export const CodeMirrorCellEditor: React.FC<Props> = React.memo(({
   cellId,
   value,
   language,
   theme,
   showLineNumbers,
+  readOnly = false,
   autoFocus,
   fullHeight = false,
   placeholder,
@@ -303,6 +1053,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   onShiftEnter,
   onCtrlEnter,
   onAltEnter,
+  onNavigate,
   onMoveUp,
   onMoveDown,
   onToggleType,
@@ -317,15 +1068,51 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   const lastValueRef = useRef<string>((value || '').replace(/\r\n/g, '\n'));
   const cellIdRef = useRef(cellId);
   cellIdRef.current = cellId;
+  const fullHeightRef = useRef(fullHeight);
+  fullHeightRef.current = fullHeight;
+
+  const pendingTextChangeRef = useRef<string | null>(null);
+  const debounceTimerRef = useRef<number | null>(null);
+
+  const flushPendingDoc = useCallback(() => {
+    if (debounceTimerRef.current !== null) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (pendingTextChangeRef.current !== null) {
+      const textToEmit = pendingTextChangeRef.current;
+      pendingTextChangeRef.current = null;
+      cbRef.current.onChange(textToEmit);
+    }
+  }, []);
+
+  const fallbackEditorId = useId();
+  useEffect(() => {
+    // Always key by per-instance useId() so split views or copied notebooks sharing a cellId never collide.
+    const unreg = registerEditorFlusher(fallbackEditorId, flushPendingDoc);
+    return () => {
+      unreg();
+      flushPendingDoc();
+    };
+  }, [fallbackEditorId, flushPendingDoc]);
 
   const [quickDoc, setQuickDoc] = useState<QuickDocState | null>(null);
   const quickDocRef = useRef<HTMLDivElement>(null);
   const quickDocActiveRef = useRef(false);
   quickDocActiveRef.current = Boolean(quickDoc);
+  const inspectAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      inspectAbortRef.current?.abort();
+      inspectAbortRef.current = null;
+    };
+  }, []);
 
   const langCompartment = useRef(new Compartment());
   const lineNumCompartment = useRef(new Compartment());
-  const appliedOptions = useRef({ language, showLineNumbers });
+  const readOnlyCompartment = useRef(new Compartment());
+  const appliedOptions = useRef({ language, showLineNumbers, readOnly });
 
   const cbRef = useRef({
     onChange,
@@ -333,6 +1120,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     onShiftEnter,
     onCtrlEnter,
     onAltEnter,
+    onNavigate,
     onMoveUp,
     onMoveDown,
     onToggleType,
@@ -347,6 +1135,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     onShiftEnter,
     onCtrlEnter,
     onAltEnter,
+    onNavigate,
     onMoveUp,
     onMoveDown,
     onToggleType,
@@ -357,6 +1146,10 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   };
 
   const inspectAtCursor = useCallback(async (view: EditorView, detailLevel = 0) => {
+    inspectAbortRef.current?.abort();
+    const controller = new AbortController();
+    inspectAbortRef.current = controller;
+
     const pos = view.state.selection.main.head;
     const coords = view.coordsAtPos(pos) || view.dom.getBoundingClientRect();
     const x = Math.max(12, Math.min(window.innerWidth - 520, coords.left));
@@ -377,11 +1170,20 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     const docText = view.state.doc.toString();
     const { notebookPath, contextCode } = getNotebookContextForCell(cellIdRef.current);
     try {
-      const res = await api.inspectCode(notebookPath, docText, pos, detailLevel, contextCode);
+      const res = await api.inspectCode(
+        notebookPath,
+        docText,
+        pos,
+        detailLevel,
+        contextCode,
+        controller.signal
+      );
+      if (controller.signal.aborted) return;
       setQuickDoc((prev) =>
         prev && prev.cursorPos === pos ? { ...prev, loading: false, data: res } : prev
       );
     } catch {
+      if (controller.signal.aborted) return;
       setQuickDoc((prev) =>
         prev && prev.cursorPos === pos
           ? { ...prev, loading: false, data: { found: false } }
@@ -428,7 +1230,8 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   }, [searchTriggerSeq, ready]);
 
   // Resolve initial visibility before paint, so visible cells never show the
-  // unhighlighted offscreen placeholder. Keep far-away editors lazy.
+  // unhighlighted offscreen placeholder. Keep far-away editors lazy via a
+  // single shared IntersectionObserver per notebook scroll container.
   useLayoutEffect(() => {
     if (ready || !containerRef.current) return;
     if (autoFocus || typeof IntersectionObserver === 'undefined') {
@@ -441,23 +1244,13 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     const viewport = scrollRoot?.getBoundingClientRect();
     if (
       container.getClientRects().length &&
-      bounds.bottom >= (viewport?.top ?? 0) - 400 &&
-      bounds.top <= (viewport?.bottom ?? window.innerHeight) + 400
+      bounds.bottom >= (viewport?.top ?? 0) - LAZY_MOUNT_MARGIN_PX &&
+      bounds.top <= (viewport?.bottom ?? window.innerHeight) + LAZY_MOUNT_MARGIN_PX
     ) {
       setReady(true);
       return;
     }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setReady(true);
-          observer.disconnect();
-        }
-      },
-      { root: containerRef.current.closest('[data-notebook-scroll]'), rootMargin: '400px 0px' }
-    );
-    observer.observe(containerRef.current);
-    return () => observer.disconnect();
+    return observeLazyMount(container, scrollRoot, () => setReady(true));
   }, [ready, autoFocus]);
 
   useLayoutEffect(() => {
@@ -465,10 +1258,15 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
 
     const initialNormalized = (value || '').replace(/\r\n/g, '\n');
     lastValueRef.current = initialNormalized;
-    appliedOptions.current = { language, showLineNumbers };
+    appliedOptions.current = { language, showLineNumbers, readOnly };
 
     const triggerAIHandler = (view: EditorView) => {
+      flushPendingDoc();
       if (!cbRef.current.onTriggerAI) return false;
+      setQuickDoc(null);
+      if (completionStatus(view.state) === 'active') {
+        closeCompletion(view);
+      }
       const sel = view.state.selection.main;
       if (!sel.empty) {
         cbRef.current.onTriggerAI({
@@ -483,6 +1281,10 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     };
 
     const openReplacePanel = (view: EditorView) => {
+      setQuickDoc(null);
+      if (completionStatus(view.state) === 'active') {
+        closeCompletion(view);
+      }
       openSearchPanel(view);
       window.requestAnimationFrame(() => {
         const searchInput = view.dom.querySelector<HTMLInputElement>(
@@ -528,8 +1330,11 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
       const seen = new Set<string>();
       const options: Completion[] = [];
 
+      const abortController = new AbortController();
+      context.addEventListener('abort', () => abortController.abort());
+
       try {
-        const res = await api.completeCode(notebookPath, docText, pos, contextCode);
+        const res = await api.completeCode(notebookPath, docText, pos, contextCode, abortController.signal);
         if (typeof res.from === 'number') {
           fromPos = res.from;
         }
@@ -653,9 +1458,33 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
 
     const saturnoKeymap = Prec.highest(
       keymap.of([
+        { key: 'Mod-y', run: redo, preventDefault: true },
+        { key: 'Mod-Shift-z', run: redo, preventDefault: true },
+        ...["'", '"'].map(quote => ({
+          key: quote,
+          run: (view: EditorView) => {
+            if (view.composing || view.state.readOnly) return false;
+            const transaction = insertBracket(view.state, quote);
+            if (!transaction) return false;
+            view.dispatch(transaction);
+            return true;
+          },
+        })),
+        ...['ArrowUp', 'ArrowDown'].map(key => ({
+          key,
+          run: (view: EditorView) => {
+            const selection = view.state.selection.main;
+            if (!selection.empty || view.state.selection.ranges.length !== 1 || completionStatus(view.state) === 'active') return false;
+            const down = key === 'ArrowDown';
+            const edge = view.moveToLineBoundary(selection, down, true).head;
+            if (edge !== (down ? view.state.doc.length : 0)) return false;
+            return cbRef.current.onNavigate?.(down) ?? false;
+          },
+        })),
         {
           key: 'Shift-Enter',
           run: (view) => {
+            flushPendingDoc();
             if (!cbRef.current.onShiftEnter) return false;
             setQuickDoc(null);
             view.contentDOM.blur();
@@ -666,6 +1495,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         {
           key: 'Mod-Enter',
           run: () => {
+            flushPendingDoc();
             if (!cbRef.current.onCtrlEnter) return false;
             setQuickDoc(null);
             cbRef.current.onCtrlEnter();
@@ -675,6 +1505,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         {
           key: 'Alt-Enter',
           run: () => {
+            flushPendingDoc();
             if (!cbRef.current.onAltEnter) return false;
             setQuickDoc(null);
             cbRef.current.onAltEnter();
@@ -684,6 +1515,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         {
           key: 'Mod-Shift-Enter',
           run: () => {
+            flushPendingDoc();
             if (!cbRef.current.onAltEnter) return false;
             setQuickDoc(null);
             cbRef.current.onAltEnter();
@@ -700,7 +1532,13 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         },
         {
           key: 'Mod-f',
-          run: (view) => openSearchPanel(view),
+          run: (view) => {
+            setQuickDoc(null);
+            if (completionStatus(view.state) === 'active') {
+              closeCompletion(view);
+            }
+            return openSearchPanel(view);
+          },
         },
         {
           key: 'Mod-h',
@@ -745,6 +1583,7 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         {
           key: 'Mod-s',
           run: () => {
+            flushPendingDoc();
             cbRef.current.onSave();
             return true;
           },
@@ -779,6 +1618,9 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
             if (/^\s*$/.test(beforeOnLine) || appliedOptions.current.language !== 'python') {
               return indentLess(view);
             }
+            if (completionStatus(view.state) === 'active') {
+              closeCompletion(view);
+            }
             void inspectAtCursor(view, 0);
             return true;
           },
@@ -808,16 +1650,19 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     const state = EditorState.create({
       doc: initialNormalized,
       extensions: [
-        saturnoPtPhrases,
         saturnoKeymap,
         history(),
         drawSelection(),
         bracketMatching(),
         closeBrackets(),
-        search({ top: true }),
+        search({ top: true, createPanel: createSaturnoSearchPanel }),
         highlightSelectionMatches(),
+        tooltips({
+          parent: getSharedTooltipHost(),
+          tooltipSpace: getEditorTooltipSpace,
+        }),
         autocompletion({
-          activateOnTyping: false,
+          activateOnTyping: true,
           override: [pythonCompletionSource],
           icons: true,
           defaultKeymap: true,
@@ -825,40 +1670,76 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         highlightActiveLine(),
         saturnoEditorTheme,
         syntaxHighlighting(saturnoHighlightStyle, { fallback: true }),
-        keymap.of([...searchKeymap, ...defaultKeymap, ...historyKeymap]),
+        keymap.of([...closeBracketsKeymap, ...searchKeymap, ...defaultKeymap, ...historyKeymap]),
         langCompartment.current.of(
           language === 'python' ? python() : createMarkdownExtension()
         ),
         lineNumCompartment.current.of(showLineNumbers ? lineNumbers() : []),
+        readOnlyCompartment.current.of(
+          readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []
+        ),
         placeholder ? cmPlaceholder(placeholder) : [],
         EditorView.lineWrapping,
         EditorView.updateListener.of((update) => {
-          if (
-            update.docChanged &&
-            !update.transactions.some((tr) => tr.annotation(externalSyncAnnotation))
-          ) {
-            const nextDoc = update.state.doc.toString();
-            if (nextDoc !== lastValueRef.current) {
-              lastValueRef.current = nextDoc;
-              cbRef.current.onChange(nextDoc);
+          if (update.docChanged) {
+            const internal = update.view as unknown as InternalEditorView;
+            if (internal.viewState) {
+              internal.viewState.printing = shouldRenderFullCellViewport(
+                fullHeightRef.current,
+                update.state
+              );
+            }
+            if (!update.transactions.some((tr) => tr.annotation(externalSyncAnnotation))) {
+              const nextDoc = update.state.doc.toString();
+              if (nextDoc !== lastValueRef.current) {
+                lastValueRef.current = nextDoc;
+                pendingTextChangeRef.current = nextDoc;
+                if (debounceTimerRef.current !== null) {
+                  clearTimeout(debounceTimerRef.current);
+                }
+                debounceTimerRef.current = window.setTimeout(() => {
+                  debounceTimerRef.current = null;
+                  if (pendingTextChangeRef.current !== null) {
+                    const textToEmit = pendingTextChangeRef.current;
+                    pendingTextChangeRef.current = null;
+                    cbRef.current.onChange(textToEmit);
+                  }
+                }, 60);
+              }
             }
           }
-          if (update.focusChanged && update.view.hasFocus) {
-            cbRef.current.onFocus?.();
+          if (update.focusChanged) {
+            if (update.view.hasFocus) {
+              cbRef.current.onFocus?.();
+            } else {
+              flushPendingDoc();
+            }
           }
         }),
       ],
     });
 
+    const containerEl = containerRef.current;
     const view = new EditorView({
       state,
-      parent: containerRef.current,
+      parent: containerEl,
     });
     viewRef.current = view;
+
+    // Pre-measure cell line heights & gutter alignment before browser paint even when
+    // lazy-mounted inside the offscreen scroll margin, avoiding unmeasured cm-gap / gutter jumps.
+    schedulePrePaintCellSync(view, fullHeightRef.current);
+    const unobserveResize = observeCellContainerResize(
+      containerEl,
+      view,
+      () => fullHeightRef.current
+    );
 
     if (autoFocus) view.focus();
 
     return () => {
+      pendingPrePaintSyncs.delete(view);
+      unobserveResize();
       view.destroy();
       viewRef.current = null;
     };
@@ -870,6 +1751,11 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
     if (!view) return;
     const normalizedIncoming = (value || '').replace(/\r\n/g, '\n');
     if (normalizedIncoming !== lastValueRef.current) {
+      if (debounceTimerRef.current !== null) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      pendingTextChangeRef.current = null;
       lastValueRef.current = normalizedIncoming;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: normalizedIncoming },
@@ -901,12 +1787,29 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
   }, [showLineNumbers]);
 
   useEffect(() => {
+    const view = viewRef.current;
+    if (!view || appliedOptions.current.readOnly === readOnly) return;
+    appliedOptions.current.readOnly = readOnly;
+    view.dispatch({
+      effects: readOnlyCompartment.current.reconfigure(
+        readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []
+      ),
+    });
+  }, [readOnly]);
+
+  useEffect(() => {
     if (autoFocus && viewRef.current && !viewRef.current.hasFocus) {
       viewRef.current.focus();
     } else if (autoFocus === false && viewRef.current && viewRef.current.hasFocus) {
       viewRef.current.contentDOM.blur();
     }
   }, [autoFocus]);
+
+  const isShowingPlaceholder = !value && Boolean(placeholder);
+  const previewLines = !ready
+    ? (value ? value.replace(/\r\n/g, '\n') : placeholder || ' ').split('\n')
+    : null;
+  const previewDigits = previewLines ? String(previewLines.length).length : 1;
 
   return (
     <>
@@ -923,16 +1826,27 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
             : undefined
         }
       >
-        {!ready && (
-          <pre className={`editor-source-preview ${showLineNumbers ? 'has-line-numbers' : ''}`}>
-            {(value || placeholder || ' ').split('\n').map((line, index) => (
+        {previewLines && (
+          <pre
+            className={`editor-source-preview ${showLineNumbers ? 'has-line-numbers' : ''}`}
+            style={
+              showLineNumbers
+                ? ({ '--sat-preview-digits': previewDigits } as React.CSSProperties)
+                : undefined
+            }
+          >
+            {previewLines.map((line, index) => (
               <span className="editor-preview-line" key={index}>
                 {showLineNumbers && (
                   <span className="editor-preview-number" aria-hidden="true">
                     {index + 1}
                   </span>
                 )}
-                <span className="editor-preview-source">{line || ' '}</span>
+                <span
+                  className={`editor-preview-source ${isShowingPlaceholder ? 'is-placeholder' : ''}`}
+                >
+                  {line || ' '}
+                </span>
               </span>
             ))}
           </pre>
@@ -1070,4 +1984,4 @@ export const CodeMirrorCellEditor: React.FC<Props> = ({
         )}
     </>
   );
-};
+});

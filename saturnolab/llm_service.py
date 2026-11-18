@@ -242,17 +242,27 @@ async def _stream_codex(
         stderr=asyncio.subprocess.PIPE,
         cwd=str(workspace_dir),
         env=env,
+        limit=4 * 1024 * 1024,
     )
 
     assert proc.stdin is not None
     assert proc.stdout is not None
-    proc.stdin.write(combined_prompt)
-    await proc.stdin.drain()
-    proc.stdin.close()
+    # Drain stderr concurrently so verbose warnings never fill the OS pipe buffer and deadlock.
+    stderr_task = asyncio.create_task(proc.stderr.read()) if proc.stderr is not None else None
 
     emitted_by_item: dict[str, int] = {}
-
     try:
+        try:
+            proc.stdin.write(combined_prompt)
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
         while True:
             raw_line = await proc.stdout.readline()
             if not raw_line:
@@ -283,17 +293,23 @@ async def _stream_codex(
                 raise RuntimeError(f"Codex erro: {evt.get('message', 'Erro desconhecido')}")
 
         await proc.wait()
-        if proc.returncode and proc.returncode != 0 and not emitted_by_item:
-            stderr_bytes = await proc.stderr.read() if proc.stderr else b""
+        stderr_bytes = await stderr_task if stderr_task is not None else b""
+        if proc.returncode:
             err_msg = stderr_bytes.decode("utf-8", errors="replace").strip()
-            if err_msg:
-                raise RuntimeError(f"Codex retornou erro: {err_msg[:400]}")
+            detail = err_msg[:400] or f"código de saída {proc.returncode}"
+            raise RuntimeError(f"Codex retornou erro: {detail}")
     finally:
         if proc.returncode is None:
             try:
                 proc.kill()
                 await proc.wait()
             except Exception:
+                pass
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except (asyncio.CancelledError, Exception):
                 pass
 
 

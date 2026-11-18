@@ -1,26 +1,44 @@
 import { useShallow } from 'zustand/react/shallow';
-import React, { useCallback, useMemo, useState } from 'react';
-import { Code2, Save, Table2 } from 'lucide-react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { Code2, Map as MapIcon, Save, Table2 } from 'lucide-react';
 import { OpenTextFileTab } from '../types/notebook';
 import { useSaturnoStore } from '../store/useSaturnoStore';
 import { isThemeDark } from '../themes';
 import { getFileVisual } from '../utils/fileUtils';
 import { parseCsv, serializeCsv } from '../utils/csvParser';
+import { inferMinimapLanguage } from '../utils/minimapUtils';
 import { FileTypeIcon } from './FileTypeIcon';
 import { CodeMirrorCellEditor } from './CodeMirrorCellEditor';
 import { CsvTableViewer } from './CsvTableViewer';
+import { TextFileMinimap } from './TextFileMinimap';
 
 interface Props {
   tab: OpenTextFileTab;
+  isVisible?: boolean;
 }
 
-export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
-  const { updateTextFileContent, saveTabById, config, showLineNumbers } = useSaturnoStore(useShallow((s) => ({
+export const TextFileEditor: React.FC<Props> = React.memo(({ tab, isVisible = true }) => {
+  const {
+    updateTextFileContent,
+    saveTabById,
+    config,
+    showLineNumbers,
+    showMinimap,
+    minimapWidth,
+    toggleMinimap,
+    setMinimapWidth,
+  } = useSaturnoStore(useShallow((s) => ({
     updateTextFileContent: s.updateTextFileContent,
     saveTabById: s.saveTabById,
     config: s.config,
     showLineNumbers: s.showLineNumbers,
+    showMinimap: s.showMinimap,
+    minimapWidth: s.minimapWidth,
+    toggleMinimap: s.toggleMinimap,
+    setMinimapWidth: s.setMinimapWidth,
   })));
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const lowerName = tab.name.toLowerCase();
   const isCsv = lowerName.endsWith('.csv');
@@ -63,10 +81,20 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
           borderColor: 'var(--sat-border)',
         }}
       >
-        <div className="flex items-center gap-2">
-          <button onClick={() => saveTabById(tab.id)} title="Salvar (Ctrl+S)"
-            className="h-7 px-2 rounded-[3px] text-xs flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer"
-            style={{ color: 'var(--sat-text-secondary)' }}><Save size={13} /><span>Salvar</span></button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => saveTabById(tab.id)}
+            disabled={Boolean(tab.truncated)}
+            title={
+              tab.truncated
+                ? 'Arquivo grande (> 512 KB) — exibição parcial somente leitura'
+                : 'Salvar (Ctrl+S)'
+            }
+            className="h-7 px-2 rounded-[3px] text-xs flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] disabled:opacity-40 transition-colors cursor-pointer"
+            style={{ color: 'var(--sat-text-secondary)' }}
+          >
+            <Save size={13} /><span>Salvar</span>
+          </button>
 
           {isTabular && (
             <div
@@ -123,7 +151,19 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
           >
             {tab.path}
           </span>
-          {tab.dirty && (
+          {tab.truncated && (
+            <span
+              className="text-[11px] font-mono px-1.5 py-0.5 rounded-[2px] shrink-0"
+              style={{
+                backgroundColor: 'var(--sat-error-bg)',
+                color: 'var(--sat-error-text)',
+              }}
+              title="Exibindo apenas os primeiros 512 KB para manter o editor rápido e evitar sobrescrita parcial"
+            >
+              somente leitura (&gt; 512 KB)
+            </span>
+          )}
+          {tab.dirty && !tab.truncated && (
             <span
               className="text-[11px] font-mono px-1.5 py-0.5 rounded-[2px]"
               style={{
@@ -134,11 +174,45 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
               modificado
             </span>
           )}
+          {!showingTable && (
+            <button
+              type="button"
+              onClick={() => toggleMinimap()}
+              aria-pressed={showMinimap}
+              aria-label={showMinimap ? 'Ocultar minimapa' : 'Mostrar minimapa'}
+              title={showMinimap ? 'Ocultar minimapa' : 'Mostrar minimapa'}
+              className="h-7 px-2 rounded-[3px] text-xs flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer shrink-0"
+              style={{
+                backgroundColor: showMinimap ? 'var(--sat-accent-soft)' : 'transparent',
+                color: showMinimap ? 'var(--sat-accent)' : 'var(--sat-text-secondary)',
+              }}
+            >
+              <MapIcon size={13} />
+              <span className="hidden lg:inline">Minimapa</span>
+            </button>
+          )}
         </div>
       </div>
 
+      {tab.truncated && (
+        <div
+          role="status"
+          className="px-3 py-1.5 text-xs border-b shrink-0"
+          style={{
+            backgroundColor: 'var(--sat-bg-subtle)',
+            borderColor: 'var(--sat-border)',
+            color: 'var(--sat-text-secondary)',
+          }}
+        >
+          Arquivo grande: exibindo prévia dos primeiros 512 KB em modo somente leitura para proteger o conteúdo restante em disco.
+        </div>
+      )}
+
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
       <div
-        className={`flex-1 min-h-0 p-2 ${showingTable ? 'overflow-hidden' : 'overflow-y-auto'}`}
+        data-editor-scroll
+        ref={scrollContainerRef}
+        className={`flex-1 min-w-0 min-h-0 p-2 ${showingTable ? 'overflow-hidden' : 'overflow-y-auto'}`}
         style={{ backgroundColor: 'var(--sat-bg-canvas)' }}
       >
         <div
@@ -151,7 +225,7 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
           {showingTable ? (
             <CsvTableViewer
               parsed={parsedCsv}
-              onCellChange={handleCsvCellChange}
+              onCellChange={tab.truncated ? undefined : handleCsvCellChange}
               onSave={() => saveTabById(tab.id)}
             />
           ) : (
@@ -160,6 +234,7 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
               language={visual.cmLanguage}
               theme={darkTheme ? 'dark' : 'light'}
               showLineNumbers={showLineNumbers}
+              readOnly={Boolean(tab.truncated)}
               fullHeight
               placeholder={`Editar ${tab.name}...`}
               onChange={(val) => updateTextFileContent(tab.id, val)}
@@ -167,6 +242,18 @@ export const TextFileEditor: React.FC<Props> = React.memo(({ tab }) => {
             />
           )}
         </div>
+      </div>
+
+      {!showingTable && showMinimap && (
+        <TextFileMinimap
+          scrollContainerRef={scrollContainerRef}
+          content={tab.content}
+          language={inferMinimapLanguage(visual.cmLanguage, tab.name)}
+          width={minimapWidth}
+          isVisible={isVisible}
+          onResizeWidth={setMinimapWidth}
+        />
+      )}
       </div>
     </div>
   );

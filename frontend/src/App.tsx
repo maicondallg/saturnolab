@@ -28,7 +28,12 @@ const TabPanel = React.memo(({ tabId, visible, focused }: {
   focused: boolean;
 }) => {
   const retainedTab = useRef(useSaturnoStore.getState().tabs.find(t => t.id === tabId));
-  const tab = useSaturnoStore(s => visible ? s.tabs.find(t => t.id === tabId) : retainedTab.current);
+  const tab = useSaturnoStore(s => {
+    if (visible) return s.tabs.find(t => t.id === tabId);
+    const prev = retainedTab.current;
+    if (prev && prev.id === tabId) return prev;
+    return s.tabs.find(t => t.id === tabId) || prev;
+  });
   retainedTab.current = tab;
   const [visited, setVisited] = useState(visible);
   useEffect(() => { if (visible) setVisited(true); }, [visible]);
@@ -41,7 +46,7 @@ const TabPanel = React.memo(({ tabId, visible, focused }: {
     <div data-tab-panel={tab.id} hidden={!visible} className="h-full">
       <Suspense fallback={null}>
         {tab.kind === 'notebook' && <NotebookView tab={tab} isVisible={visible} isActivePane={visible && focused} />}
-        {tab.kind === 'file' && <TextFileEditor tab={tab} />}
+        {tab.kind === 'file' && <TextFileEditor tab={tab} isVisible={visible} />}
         {tab.kind === 'launcher' && <LauncherView />}
       </Suspense>
     </div>
@@ -174,7 +179,7 @@ export const App: React.FC = () => {
       try {
         const { tabId, sourcePaneId } = JSON.parse(tabDataRaw);
         if (zone === 'left' || zone === 'right') {
-          splitTab(tabId, targetPaneId, zone);
+          splitTab(tabId, targetPaneId, zone, sourcePaneId);
         } else {
           moveTabToPane(tabId, sourcePaneId, targetPaneId);
         }
@@ -303,7 +308,7 @@ export const App: React.FC = () => {
 
                         return (
                           <div
-                            key={`${pane.id}_${tab.id}`}
+                            key={`${pane.id}_${tab.instanceId}`}
                             draggable
                             onDragStart={(e) => {
                               e.dataTransfer.setData(
@@ -433,7 +438,7 @@ export const App: React.FC = () => {
                   {/* Active Tab Content */}
                   <div className="flex-1 min-h-0 overflow-hidden relative">
                     {paneTabs.map(tab => (
-                      <TabPanel key={tab.id} tabId={tab.id} visible={tab.id === activeTab?.id} focused={isPaneFocused} />
+                      <TabPanel key={tab.instanceId} tabId={tab.id} visible={tab.id === activeTab?.id} focused={isPaneFocused} />
                     ))}
 
                     {/* Visual Drop Zone Overlay when dragging a tab or file */}

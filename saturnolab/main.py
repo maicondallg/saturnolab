@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from . import __version__, fs_service
 from .config import config_manager
@@ -35,71 +36,64 @@ async def lifespan(_app: FastAPI):
     await close_http_client()
 
 
-class _AsyncRWLock:
-    """Allow concurrent filesystem reads while keeping writes strictly serialized."""
+class _FilesystemLockCoordinator:
+    """Per-path write locks + structural tree lock without blocking atomic file reads."""
 
     def __init__(self) -> None:
-        self._readers = 0
-        self._writer_active = False
-        self._writers_waiting = 0
-        self._cond: asyncio.Condition | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._structural_lock: asyncio.Lock | None = None
+        self._path_locks: dict[str, asyncio.Lock] = {}
 
-    def _get_cond(self) -> asyncio.Condition:
+    def _ensure_loop(self) -> asyncio.Lock:
         loop = asyncio.get_running_loop()
-        if self._cond is None or self._loop is not loop:
-            self._cond = asyncio.Condition()
+        if self._structural_lock is None or self._loop is not loop:
             self._loop = loop
-            self._readers = 0
-            self._writer_active = False
-            self._writers_waiting = 0
-        return self._cond
+            self._structural_lock = asyncio.Lock()
+            self._path_locks.clear()
+        return self._structural_lock
 
     @asynccontextmanager
-    async def read(self):
-        cond = self._get_cond()
-        async with cond:
-            while self._writer_active or self._writers_waiting > 0:
-                await cond.wait()
-            self._readers += 1
-        try:
+    async def write_file(self, key: str):
+        self._ensure_loop()
+        if len(self._path_locks) > 512:
+            # Prune idle path locks to bound memory
+            for k in [k for k, lk in self._path_locks.items() if not lk.locked()]:
+                self._path_locks.pop(k, None)
+        path_lock = self._path_locks.setdefault(key, asyncio.Lock())
+        async with path_lock:
             yield
-        finally:
-            async with cond:
-                self._readers -= 1
-                if self._readers == 0:
-                    cond.notify_all()
 
     @asynccontextmanager
-    async def write(self):
-        cond = self._get_cond()
-        async with cond:
-            self._writers_waiting += 1
-            try:
-                while self._writer_active or self._readers > 0:
-                    await cond.wait()
-                self._writer_active = True
-            finally:
-                self._writers_waiting -= 1
-        try:
+    async def structural_write(self):
+        structural_lock = self._ensure_loop()
+        async with structural_lock:
             yield
-        finally:
-            async with cond:
-                self._writer_active = False
-                cond.notify_all()
 
 
-filesystem_rw_lock = _AsyncRWLock()
+fs_locks = _FilesystemLockCoordinator()
 
 
 async def run_fs_read(operation, *args, **kwargs):
-    async with filesystem_rw_lock.read():
+    # Reads never observe half-written files because writes use mkstemp + atomic os.replace.
+    return await run_in_threadpool(operation, *args, **kwargs)
+
+
+async def run_fs_file_write(path_key: str, operation, *args, **kwargs):
+    async with fs_locks.write_file(path_key):
         return await run_in_threadpool(operation, *args, **kwargs)
 
 
 async def run_fs_write(operation, *args, **kwargs):
-    async with filesystem_rw_lock.write():
+    async with fs_locks.structural_write():
         return await run_in_threadpool(operation, *args, **kwargs)
+
+
+class _ImmutableStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        return response
 
 
 def _is_allowed_ws_origin(ws: WebSocket) -> bool:
@@ -118,6 +112,7 @@ def _is_allowed_ws_origin(ws: WebSocket) -> bool:
 
 app = FastAPI(title="SaturnoLab", version=__version__, lifespan=lifespan)
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=_LOCAL_ORIGIN_RE.pattern,
@@ -253,8 +248,11 @@ async def browse_system_dirs(path: str = Query(default="")) -> dict[str, Any]:
 @app.post("/api/workspace")
 async def switch_workspace(req: WorkspaceSwitchRequest) -> dict[str, Any]:
     try:
+        target = Path(req.path).expanduser().resolve()
+        if not target.exists() or not target.is_dir():
+            raise ValueError(f"Diretório não encontrado: {req.path}")
         await kernel_registry.shutdown_all()
-        new_ws = config_manager.set_workspace_path(req.path)
+        new_ws = config_manager.set_workspace_path(str(target))
         return {
             "workspace_root": str(new_ws),
             "listing": await run_fs_read(fs_service.list_directory, new_ws, ""),
@@ -270,7 +268,9 @@ async def api_list_dir(
     try:
         return await run_fs_read(
             fs_service.list_directory,
-            config_manager.get_workspace_path(), path, recursive=recursive
+            config_manager.get_workspace_path(),
+            path,
+            recursive=recursive,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -286,6 +286,10 @@ async def api_read_notebook(path: str = Query(...)) -> dict[str, Any]:
         existing = kernel_registry.get_existing(ws, nb["path"])
         nb["kernel_status"] = existing.status if existing else "not_started"
         nb["variables"] = existing.variables_cache if existing else []
+        if existing and existing.active_cell_id:
+            nb["active_cell_id"] = existing.active_cell_id
+            nb["active_execution_count"] = existing.active_execution_count
+            nb["active_outputs"] = list(existing.active_outputs)
         return nb
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -294,14 +298,29 @@ async def api_read_notebook(path: str = Query(...)) -> dict[str, Any]:
 
 
 @app.post("/api/fs/notebook/save")
-async def api_save_notebook(req: SaveNotebookRequest) -> dict[str, Any]:
+async def api_save_notebook(request: Request) -> dict[str, Any]:
     try:
-        return await run_fs_write(
+        ws = config_manager.get_workspace_path()
+        raw_body = await request.body()
+        # Peek at path quickly when small, or serialize via per-path lock after off-loop JSON decode
+        parsed = await run_in_threadpool(json.loads, raw_body)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("path"), str):
+            raise ValueError("Payload inválido para salvar notebook.")
+        rel_path = parsed["path"]
+        cells = parsed.get("cells")
+        metadata = parsed.get("metadata")
+        if not isinstance(cells, list):
+            raise ValueError("Lista de células inválida.")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("Metadados inválidos.")
+        lock_key = str(fs_service.safe_resolve(ws, rel_path))
+        return await run_fs_file_write(
+            lock_key,
             fs_service.save_notebook,
-            config_manager.get_workspace_path(),
-            req.path,
-            req.cells,
-            req.metadata,
+            ws,
+            rel_path,
+            cells,
+            metadata,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -337,7 +356,8 @@ async def api_create_folder(req: CreateFolderRequest) -> dict[str, Any]:
 async def api_rename(req: RenameRequest) -> dict[str, Any]:
     try:
         ws = config_manager.get_workspace_path()
-        await kernel_registry.shutdown_notebook(ws, req.old_path)
+        await run_fs_read(fs_service.plan_rename_entry, ws, req.old_path, req.new_name)
+        await kernel_registry.shutdown_notebook(ws, req.old_path, follow_symlinks=False)
         return await run_fs_write(fs_service.rename_entry, ws, req.old_path, req.new_name)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -347,7 +367,7 @@ async def api_rename(req: RenameRequest) -> dict[str, Any]:
 async def api_delete(path: str = Query(...)) -> dict[str, Any]:
     try:
         ws = config_manager.get_workspace_path()
-        await kernel_registry.shutdown_notebook(ws, path)
+        await kernel_registry.shutdown_notebook(ws, path, follow_symlinks=False)
         return await run_fs_write(fs_service.delete_entry, ws, path)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -366,9 +386,14 @@ async def api_read_file(path: str = Query(...)) -> dict[str, Any]:
 @app.post("/api/fs/file/save")
 async def api_save_file(req: SaveFileRequest) -> dict[str, Any]:
     try:
-        return await run_fs_write(
+        ws = config_manager.get_workspace_path()
+        lock_key = str(fs_service.safe_resolve(ws, req.path))
+        return await run_fs_file_write(
+            lock_key,
             fs_service.write_text_file,
-            config_manager.get_workspace_path(), req.path, req.content
+            ws,
+            req.path,
+            req.content,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -379,7 +404,9 @@ async def api_create_file(req: CreateFileRequest) -> dict[str, Any]:
     try:
         return await run_fs_write(
             fs_service.create_text_file,
-            config_manager.get_workspace_path(), req.folder, req.name
+            config_manager.get_workspace_path(),
+            req.folder,
+            req.name,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -388,7 +415,12 @@ async def api_create_file(req: CreateFileRequest) -> dict[str, Any]:
 @app.post("/api/fs/copy")
 async def api_copy_entries(req: MoveEntriesRequest) -> dict[str, Any]:
     try:
-        return await run_fs_write(fs_service.copy_entries, config_manager.get_workspace_path(), req.paths, req.target_folder)
+        return await run_fs_write(
+            fs_service.copy_entries,
+            config_manager.get_workspace_path(),
+            req.paths,
+            req.target_folder,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -399,7 +431,7 @@ async def api_move_entries(req: MoveEntriesRequest) -> dict[str, Any]:
         ws = config_manager.get_workspace_path()
         planned = await run_fs_read(fs_service.plan_move_entries, ws, req.paths, req.target_folder)
         for _, _, path in planned:
-            await kernel_registry.shutdown_notebook(ws, path)
+            await kernel_registry.shutdown_notebook(ws, path, follow_symlinks=False)
         return await run_fs_write(fs_service.move_entries, ws, req.paths, req.target_folder)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -410,7 +442,7 @@ async def api_delete_batch(req: DeleteBatchRequest) -> dict[str, Any]:
     try:
         ws = config_manager.get_workspace_path()
         for p in req.paths:
-            await kernel_registry.shutdown_notebook(ws, p)
+            await kernel_registry.shutdown_notebook(ws, p, follow_symlinks=False)
         return await run_fs_write(fs_service.delete_entries, ws, req.paths)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -465,7 +497,7 @@ async def api_complete_code(req: KernelCompleteRequest) -> dict[str, Any]:
     ws = config_manager.get_workspace_path()
     session = kernel_registry.get_existing(ws, req.notebook_path) if req.notebook_path else None
     if session:
-        res = await session.complete(req.code, req.cursor_pos)
+        res = await session.complete(req.code, req.cursor_pos, run_jedi_fallback=False)
         if res.get("options"):
             return res
 
@@ -492,7 +524,9 @@ async def api_inspect_code(req: KernelInspectRequest) -> dict[str, Any]:
     ws = config_manager.get_workspace_path()
     session = kernel_registry.get_existing(ws, req.notebook_path) if req.notebook_path else None
     if session:
-        res = await session.inspect_symbol(req.code, req.cursor_pos, req.detail_level)
+        res = await session.inspect_symbol(
+            req.code, req.cursor_pos, req.detail_level, run_jedi_fallback=False
+        )
         if res.get("found"):
             return res
 
@@ -520,13 +554,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     send_lock = asyncio.Lock()
     ai_tasks: dict[str, asyncio.Task[Any]] = {}
     exec_tasks: set[asyncio.Task[Any]] = set()
+    ws_closed = False
 
     async def safe_send(payload: dict[str, Any]) -> None:
+        nonlocal ws_closed
+        if ws_closed:
+            return
         try:
             async with send_lock:
                 await ws.send_json(payload)
         except Exception:
-            pass
+            ws_closed = True
+
+    kernel_registry.add_listener(safe_send)
+
+    # Immediately hydrate active kernel statuses and any in-flight cell execution upon (re)connect.
+    initial_sessions = kernel_registry.snapshot_workspace(config_manager.get_workspace_path())
+    if initial_sessions:
+        await safe_send({"type": "kernel_session_sync", "sessions": initial_sessions})
 
     async def handle_execute(msg: dict[str, Any]) -> None:
         nb_path = msg.get("notebook_path", "")
@@ -547,28 +592,28 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 stop_on_error=stop_on_error,
             )
         except Exception as exc:
-            await safe_send(
-                {
-                    "type": "cell_output",
-                    "notebook_path": nb_path,
-                    "cell_id": cell_id,
-                    "output": {
-                        "output_type": "error",
-                        "ename": "KernelError",
-                        "evalue": str(exc),
-                        "traceback": [str(exc)],
-                    },
-                }
-            )
-            await safe_send(
-                {
-                    "type": "cell_execution_done",
-                    "notebook_path": nb_path,
-                    "cell_id": cell_id,
-                    "execution_count": None,
-                    "variables": [],
-                }
-            )
+            err_payload = {
+                "type": "cell_output",
+                "notebook_path": nb_path,
+                "cell_id": cell_id,
+                "output": {
+                    "output_type": "error",
+                    "ename": "KernelError",
+                    "evalue": str(exc),
+                    "traceback": [str(exc)],
+                },
+            }
+            done_payload = {
+                "type": "cell_execution_done",
+                "notebook_path": nb_path,
+                "cell_id": cell_id,
+                "execution_count": None,
+                "variables": [],
+            }
+            await safe_send(err_payload)
+            await kernel_registry.broadcast(err_payload, exclude=safe_send)
+            await safe_send(done_payload)
+            await kernel_registry.broadcast(done_payload, exclude=safe_send)
 
     async def handle_ai_generate(msg: dict[str, Any]) -> None:
         request_id = msg.get("request_id", "")
@@ -647,6 +692,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 if session:
                     await session.interrupt()
 
+            elif action == "sync_kernels":
+                sessions = kernel_registry.snapshot_workspace(config_manager.get_workspace_path())
+                await safe_send({"type": "kernel_session_sync", "sessions": sessions})
+
             elif action == "ai_generate":
                 req_id = data.get("request_id", "default")
                 if req_id in ai_tasks:
@@ -665,6 +714,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        ws_closed = True
+        kernel_registry.remove_listener(safe_send)
         for t in list(ai_tasks.values()):
             t.cancel()
 
@@ -673,7 +724,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_DIR_RESOLVED = STATIC_DIR.resolve()
 if (STATIC_DIR / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+    app.mount("/assets", _ImmutableStaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
 
 _INDEX_HTML_CACHE: tuple[tuple[int, int], str] | None = None
 
@@ -693,17 +744,38 @@ def _read_cached_index_html(index_file: Path) -> str:
 async def serve_spa(full_path: str):
     if STATIC_DIR.exists():
         candidate = (STATIC_DIR / full_path).resolve()
-        if full_path and candidate.name != "index.html" and candidate.is_file() and STATIC_DIR_RESOLVED in candidate.parents:
+        if (
+            full_path
+            and candidate.name != "index.html"
+            and candidate.is_file()
+            and STATIC_DIR_RESOLVED in candidate.parents
+        ):
             return FileResponse(str(candidate))
         index_file = STATIC_DIR / "index.html"
         if index_file.is_file():
             # Supply only UI settings, so the first render has the final geometry.
             cfg = config_manager.config
             fields = (
-                "theme", "active_provider", "default_ai_apply_mode", "include_kernel_variables",
-                "notebook_layout", "sidebar_position", "sidebar_width", "editor_font_size",
-                "show_line_numbers", "auto_scroll_on_run", "show_modified_time",
-                "confirm_kernel_restart", "auto_save", "auto_save_delay", "output_display",
+                "theme",
+                "active_provider",
+                "default_ai_apply_mode",
+                "include_kernel_variables",
+                "notebook_layout",
+                "sidebar_position",
+                "sidebar_width",
+                "editor_font_size",
+                "show_line_numbers",
+                "auto_scroll_on_run",
+                "show_modified_time",
+                "confirm_kernel_restart",
+                "auto_save",
+                "auto_save_delay",
+                "output_display",
+                "output_format",
+                "output_height",
+                "show_minimap",
+                "minimap_width",
+                "minimap_show_outputs",
             )
             bootstrap = {field: getattr(cfg, field) for field in fields}
             bootstrap.update(
@@ -713,7 +785,9 @@ async def serve_spa(full_path: str):
             )
             payload = json.dumps(bootstrap).replace("<", "\\u003c")
             html = await run_in_threadpool(_read_cached_index_html, index_file)
-            html = html.replace("</head>", f"<script>window.__SATURNO_BOOTSTRAP__={payload};</script></head>")
+            html = html.replace(
+                "</head>", f"<script>window.__SATURNO_BOOTSTRAP__={payload};</script></head>"
+            )
             return HTMLResponse(html, headers={"Cache-Control": "no-store"})
     return HTMLResponse(
         "<h3>SaturnoLab frontend static assets not built yet. Run <code>npm run build</code> in <code>frontend/</code>.</h3>",

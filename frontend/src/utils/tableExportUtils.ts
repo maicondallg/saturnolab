@@ -860,6 +860,8 @@ export async function renderTableToPngBlob(
       offscreenHost.style.cssText = viewportEl.style.cssText;
       if (offscreenHost.getAttribute('data-wrap') === 'nowrap') {
         offscreenHost.style.setProperty('--sat-table-max-col-w', 'none');
+        offscreenHost.style.setProperty('--sat-index-max-w', 'none');
+        offscreenHost.style.removeProperty('--sat-index-col-w');
       }
       offscreenHost.style.position = 'fixed';
       offscreenHost.style.left = '-99999px';

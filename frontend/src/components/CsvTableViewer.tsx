@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { ParsedCsv } from '../utils/csvParser';
+import { registerEditorFlusher } from '../services/editorViews';
 
 interface Props {
   parsed: ParsedCsv;
@@ -17,6 +18,7 @@ const INITIAL_VISIBLE_ROWS = 500;
 const LOAD_MORE_STEP = 1000;
 
 export const CsvTableViewer: React.FC<Props> = React.memo(({ parsed, onCellChange, onSave }) => {
+  const flusherId = useId();
   const [visibleLimit, setVisibleLimit] = useState(INITIAL_VISIBLE_ROWS);
   const [editing, setEditing] = useState<EditingTarget | null>(null);
   const [draft, setDraft] = useState('');
@@ -27,6 +29,25 @@ export const CsvTableViewer: React.FC<Props> = React.memo(({ parsed, onCellChang
     () => (rows.length > visibleLimit ? rows.slice(0, visibleLimit) : rows),
     [rows, visibleLimit]
   );
+
+  const commitEdit = useCallback(() => {
+    if (!editing || !onCellChange) {
+      setEditing(null);
+      return;
+    }
+    const prevValue = editing.isHeader
+      ? headers[editing.col] ?? ''
+      : rows[editing.row]?.[editing.col] ?? '';
+    if (draft !== prevValue) {
+      onCellChange(editing.row, editing.col, draft, editing.isHeader);
+    }
+    setEditing(null);
+  }, [editing, onCellChange, headers, rows, draft]);
+
+  useEffect(() => {
+    if (!editing) return;
+    return registerEditorFlusher(`csv_table_${flusherId}`, commitEdit);
+  }, [editing, commitEdit, flusherId]);
 
   if (headers.length === 0) {
     return (
@@ -43,20 +64,6 @@ export const CsvTableViewer: React.FC<Props> = React.memo(({ parsed, onCellChang
     if (!onCellChange) return;
     setEditing({ row, col, isHeader });
     setDraft(currentValue);
-  };
-
-  const commitEdit = () => {
-    if (!editing || !onCellChange) {
-      setEditing(null);
-      return;
-    }
-    const prevValue = editing.isHeader
-      ? headers[editing.col] ?? ''
-      : rows[editing.row]?.[editing.col] ?? '';
-    if (draft !== prevValue) {
-      onCellChange(editing.row, editing.col, draft, editing.isHeader);
-    }
-    setEditing(null);
   };
 
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -107,7 +114,7 @@ export const CsvTableViewer: React.FC<Props> = React.memo(({ parsed, onCellChang
   const hasMore = rows.length > visibleRows.length;
 
   return (
-    <div className="h-full flex flex-col overflow-hidden" onKeyDown={handleContainerKeyDown}>
+    <div className="h-full flex flex-col overflow-hidden isolate" onKeyDown={handleContainerKeyDown}>
       <div className="flex-1 min-h-0 overflow-auto">
         <table className="w-max min-w-full border-collapse text-[13px] font-mono">
           <thead className="sticky top-0 z-10">

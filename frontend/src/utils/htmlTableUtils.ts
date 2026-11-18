@@ -49,6 +49,7 @@ export interface VirtualTableData {
   colTypes: ('number' | 'text')[];
   ellipsisCols: boolean[];
   colEstimatedWidths: number[];
+  longestCellPerCol: string[];
   hasCustomStyles: boolean;
   tableId?: string;
   tableClass?: string;
@@ -75,7 +76,9 @@ export interface ParsedNotebookHtml {
 export const VIRTUAL_TABLE_ROW_THRESHOLD = 100;
 
 const MAX_PARSE_CACHE_ENTRIES = 16;
+const MAX_PARSE_CACHE_CHARS = 12_000_000;
 const htmlParseCache = new Map<string, ParsedNotebookHtml>();
+let htmlParseCacheChars = 0;
 
 const NULL_TOKENS = new Set([
   'nan',
@@ -319,6 +322,7 @@ interface ExtractedBodyStats {
   rows: VirtualTableRow[];
   expectedRowLen: number;
   maxCharsPerCol: Int32Array;
+  longestCellPerCol: string[];
   canStickyIndex: boolean;
   indexPrefixCount: number;
   hasEllipsisRow: boolean;
@@ -340,6 +344,7 @@ function parseFastUniformTbody(tbodyInner: string): ExtractedBodyStats | null {
   const rows: VirtualTableRow[] = [];
   let expectedRowLen = -1;
   let maxCharsPerCol = new Int32Array(0);
+  let longestCellPerCol: string[] = [];
   let canStickyIndex = true;
   let indexPrefixCount = 0;
   let hasEllipsisRow = false;
@@ -432,7 +437,8 @@ function parseFastUniformTbody(tbodyInner: string): ExtractedBodyStats | null {
       if (txt.length > 0) {
         nonEmptyCount++;
         if (expectedRowLen > 0 && txt.length > maxCharsPerCol[colIdx]) {
-          maxCharsPerCol[colIdx] = Math.min(80, txt.length);
+          maxCharsPerCol[colIdx] = Math.min(140, txt.length);
+          longestCellPerCol[colIdx] = txt.length > 140 ? txt.slice(0, 140) : txt;
         }
         if (allEllipsisInRow && !isEllipsisToken(txt)) {
           allEllipsisInRow = false;
@@ -448,8 +454,10 @@ function parseFastUniformTbody(tbodyInner: string): ExtractedBodyStats | null {
       if (colIdx === 0) return null;
       expectedRowLen = colIdx;
       maxCharsPerCol = new Int32Array(expectedRowLen);
+      longestCellPerCol = new Array<string>(expectedRowLen).fill('');
       for (let i = 0; i < expectedRowLen; i++) {
-        maxCharsPerCol[i] = Math.min(80, rowTexts[i].length);
+        maxCharsPerCol[i] = Math.min(140, rowTexts[i].length);
+        longestCellPerCol[i] = rowTexts[i].length > 140 ? rowTexts[i].slice(0, 140) : rowTexts[i];
       }
       if (rowStyles && rowStyles.length < expectedRowLen) {
         const padded = new Array<VirtualCellStyle | null>(expectedRowLen).fill(null);
@@ -499,6 +507,7 @@ function parseFastUniformTbody(tbodyInner: string): ExtractedBodyStats | null {
     rows,
     expectedRowLen,
     maxCharsPerCol,
+    longestCellPerCol,
     canStickyIndex,
     indexPrefixCount,
     hasEllipsisRow,
@@ -517,6 +526,7 @@ function finalizeVirtualTableFromStats(
     rows: extractedRows,
     expectedRowLen,
     maxCharsPerCol,
+    longestCellPerCol,
     indexPrefixCount,
     hasEllipsisRow,
     dataRowCount,
@@ -636,10 +646,10 @@ function finalizeVirtualTableFromStats(
     const label = rawLabel || (isIndex ? 'Índice' : `Coluna ${col + 1}`);
     columns.push({ index: col, label, isIndex });
 
-    const headerChars = Math.min(48, rawLabel.length + (canSort ? 2 : 0));
+    const headerChars = Math.min(64, rawLabel.length + (canSort ? 2 : 0));
     const maxChars = Math.max(headerChars, maxCharsPerCol[col]);
-    const minColW = isIndex ? 54 : 68;
-    colEstimatedWidths[col] = Math.round(Math.max(minColW, Math.min(420, maxChars * 8.0 + 26)));
+    const minColW = isIndex ? 48 : 68;
+    colEstimatedWidths[col] = Math.round(Math.max(minColW, Math.min(960, maxChars * 8.0 + 26)));
 
     if (primaryHeaderRow && primaryHeaderRow.cells[col]) {
       const hCell = primaryHeaderRow.cells[col];
@@ -704,6 +714,7 @@ function finalizeVirtualTableFromStats(
       colTypes,
       ellipsisCols,
       colEstimatedWidths,
+      longestCellPerCol,
       hasCustomStyles,
       tableId: table.id || undefined,
       tableClass: table.className,
@@ -750,6 +761,7 @@ function tryExtractVirtualTable(
   // Single pass over tbody.rows: validate uniform grid & extract compact JS row model
   const extractedRows: VirtualTableRow[] = new Array(rowCount);
   const maxCharsPerCol = new Int32Array(expectedRowLen);
+  const longestCellPerCol = new Array<string>(expectedRowLen).fill('');
   let canStickyIndex = true;
   let indexPrefixCount = 0;
   let hasEllipsisRow = false;
@@ -785,7 +797,8 @@ function tryExtractVirtualTable(
       if (trimmed.length > 0) {
         nonEmptyCount++;
         if (trimmed.length > maxCharsPerCol[c]) {
-          maxCharsPerCol[c] = Math.min(80, trimmed.length);
+          maxCharsPerCol[c] = Math.min(140, trimmed.length);
+          longestCellPerCol[c] = trimmed.length > 140 ? trimmed.slice(0, 140) : trimmed;
         }
         if (allEllipsisInRow && !isEllipsisToken(trimmed)) {
           allEllipsisInRow = false;
@@ -941,10 +954,10 @@ function tryExtractVirtualTable(
     columns.push({ index: col, label, isIndex });
 
     // Estimate stable column width from header + widest cell across all rows
-    const headerChars = Math.min(48, rawLabel.length + (canSort ? 2 : 0));
+    const headerChars = Math.min(64, rawLabel.length + (canSort ? 2 : 0));
     const maxChars = Math.max(headerChars, maxCharsPerCol[col]);
-    const minColW = isIndex ? 54 : 68;
-    colEstimatedWidths[col] = Math.round(Math.max(minColW, Math.min(420, maxChars * 8.0 + 26)));
+    const minColW = isIndex ? 48 : 68;
+    colEstimatedWidths[col] = Math.round(Math.max(minColW, Math.min(960, maxChars * 8.0 + 26)));
 
     if (primaryHeaderRow && primaryHeaderRow.cells[col]) {
       const hCell = primaryHeaderRow.cells[col];
@@ -1009,6 +1022,7 @@ function tryExtractVirtualTable(
       colTypes,
       ellipsisCols,
       colEstimatedWidths,
+      longestCellPerCol,
       hasCustomStyles,
       tableId: table.id || undefined,
       tableClass: table.className,
@@ -1364,15 +1378,29 @@ function detachLargeUniformTbodies(rawHtml: string): {
 
 export function inspectAndEnhanceHtml(rawHtml: string): ParsedNotebookHtml {
   const cached = htmlParseCache.get(rawHtml);
-  if (cached) return cached;
+  if (cached) {
+    // Refresh LRU position on hit
+    htmlParseCache.delete(rawHtml);
+    htmlParseCache.set(rawHtml, cached);
+    return cached;
+  }
 
   const remember = (res: ParsedNotebookHtml): ParsedNotebookHtml => {
-    // Avoid keeping huge rawHtml keys forever; evict oldest when full
-    if (htmlParseCache.size >= MAX_PARSE_CACHE_ENTRIES) {
+    // Bound both entry count and total cached HTML bytes so giant DataFrame outputs
+    // don't pin hundreds of megabytes in memory across re-runs.
+    const entryChars = rawHtml.length;
+    while (
+      htmlParseCache.size > 0 &&
+      (htmlParseCache.size >= MAX_PARSE_CACHE_ENTRIES ||
+        htmlParseCacheChars + entryChars > MAX_PARSE_CACHE_CHARS)
+    ) {
       const oldestKey = htmlParseCache.keys().next().value;
-      if (oldestKey !== undefined) htmlParseCache.delete(oldestKey);
+      if (oldestKey === undefined) break;
+      htmlParseCache.delete(oldestKey);
+      htmlParseCacheChars = Math.max(0, htmlParseCacheChars - oldestKey.length);
     }
     htmlParseCache.set(rawHtml, res);
+    htmlParseCacheChars += entryChars;
     return res;
   };
 

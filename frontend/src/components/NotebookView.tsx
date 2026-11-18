@@ -2,14 +2,16 @@ import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useMemo, useRef } from 'react';
 import {
   FastForward,
+  Map as MapIcon,
   Plus,
   Save,
   Square,
 } from 'lucide-react';
 import { OpenNotebookTab } from '../types/notebook';
-import { useSaturnoStore } from '../store/useSaturnoStore';
+import { canAcceptInlineAIPreview, useSaturnoStore } from '../store/useSaturnoStore';
 import { hiddenSectionCells } from '../utils/notebookOutline';
 import { NotebookCell } from './NotebookCell';
+import { NotebookMinimap } from './NotebookMinimap';
 
 interface Props {
   tab: OpenNotebookTab;
@@ -21,6 +23,11 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   const {
     notebookMode,
     notebookLayout,
+    showMinimap,
+    minimapWidth,
+    minimapShowOutputs,
+    toggleMinimap,
+    setMinimapWidth,
     saveTabById,
     addCellAbove,
     addCellBelow,
@@ -29,6 +36,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     pasteCellBelow,
     deleteCell,
     undoDeleteCell,
+    redoDeleteCell,
     moveCell,
     changeCellType,
     selectCell,
@@ -43,6 +51,11 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
   } = useSaturnoStore(useShallow((s) => ({
     notebookMode: isActivePane ? s.notebookMode : 'command',
     notebookLayout: s.notebookLayout,
+    showMinimap: s.showMinimap,
+    minimapWidth: s.minimapWidth,
+    minimapShowOutputs: s.minimapShowOutputs,
+    toggleMinimap: s.toggleMinimap,
+    setMinimapWidth: s.setMinimapWidth,
     saveTabById: s.saveTabById,
     addCellAbove: s.addCellAbove,
     addCellBelow: s.addCellBelow,
@@ -51,6 +64,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     pasteCellBelow: s.pasteCellBelow,
     deleteCell: s.deleteCell,
     undoDeleteCell: s.undoDeleteCell,
+    redoDeleteCell: s.redoDeleteCell,
     moveCell: s.moveCell,
     changeCellType: s.changeCellType,
     selectCell: s.selectCell,
@@ -89,14 +103,15 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
       if (rafId !== null) window.cancelAnimationFrame(rafId);
       rafId = window.requestAnimationFrame(() => {
         rafId = null;
+        const escapedId = CSS.escape(scrollSignal.cellId);
         const cellEl = container.querySelector(
-          `[data-cell-id="${scrollSignal.cellId}"]`
+          `[data-cell-id="${escapedId}"]`
         ) as HTMLElement | null;
         const outputEl = container.querySelector(
-          `[data-cell-output-id="${scrollSignal.cellId}"]`
+          `[data-cell-output-id="${escapedId}"]`
         ) as HTMLElement | null;
         const bottomEl = container.querySelector(
-          `[data-cell-bottom-id="${scrollSignal.cellId}"]`
+          `[data-cell-bottom-id="${escapedId}"]`
         ) as HTMLElement | null;
 
         const targetEl =
@@ -114,8 +129,13 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
 
         if (scrollSignal.kind === 'output') {
           if (targetRect.bottom > containerRect.bottom - bottomMargin) {
-            const delta = targetRect.bottom - (containerRect.bottom - bottomMargin);
-            container.scrollBy({ top: delta, behavior: 'smooth' });
+            const desiredDown = targetRect.bottom - (containerRect.bottom - bottomMargin);
+            // Never scroll the top of a tall output off-screen (prevents up/down ping-pong).
+            const maxDown = Math.max(0, targetRect.top - (containerRect.top + topMargin));
+            const delta = Math.min(desiredDown, maxDown);
+            if (delta > 1) {
+              container.scrollBy({ top: delta, behavior: 'smooth' });
+            }
           } else if (targetRect.top < containerRect.top + topMargin) {
             const delta = targetRect.top - (containerRect.top + topMargin);
             container.scrollBy({ top: delta, behavior: 'smooth' });
@@ -162,8 +182,17 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     if (!isActivePane) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target && target.closest('[data-modal-root="true"], .workspace-sidebar, .activity-rail, [data-app-menu]')) return;
+      const target = e.target instanceof Element ? (e.target as HTMLElement) : null;
+      if (
+        (target && target.closest('[data-modal-root="true"], .workspace-sidebar, .activity-rail, [data-app-menu]')) ||
+        document.querySelector('[data-modal-root="true"], details[data-app-menu][open], .file-context-menu[data-app-menu]')
+      ) {
+        return;
+      }
+
+      const myPanel = scrollContainerRef.current?.closest('[data-tab-panel]');
+      const targetPanel = target?.closest('[data-tab-panel]');
+      if (targetPanel && myPanel && targetPanel !== myPanel) return;
 
       const {
         notebookMode: curMode,
@@ -177,7 +206,53 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
         (target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT' ||
-          target.closest('.cm-editor') || target.closest('[data-app-menu]') || target.tagName === 'BUTTON' || target.tagName === 'SUMMARY');
+          target.closest('.cm-editor') ||
+          target.closest('[data-inline-ai]') ||
+          target.closest('[data-app-menu]') ||
+          target.tagName === 'BUTTON' ||
+          target.tagName === 'SUMMARY');
+
+      const isEnterKey = e.key === 'Enter' || e.key === '\n' || e.key === '\r';
+      if (
+        !e.defaultPrevented &&
+        !e.isComposing &&
+        isEnterKey &&
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        !target?.closest('[data-inline-ai]')
+      ) {
+        const targetCellEl = target?.closest<HTMLElement>('[data-cell-id]');
+        if (
+          !targetCellEl ||
+          !scrollContainerRef.current ||
+          scrollContainerRef.current.contains(targetCellEl)
+        ) {
+          const isUnrelatedEditable = Boolean(
+            target &&
+              (target.closest('.cm-search') ||
+                (!target.closest('.cm-content') &&
+                  (target.matches('input, textarea, select') ||
+                    Boolean(target.closest('[contenteditable="true"]')))))
+          );
+          const targetCellId = targetCellEl ? targetCellEl.dataset.cellId : curCell?.id;
+          if (targetCellId && !isUnrelatedEditable) {
+            const store = useSaturnoStore.getState();
+            if (canAcceptInlineAIPreview(store.inlineAI[targetCellId])) {
+              e.preventDefault();
+              e.stopPropagation();
+              const editor = scrollContainerRef.current?.querySelector<HTMLElement>(
+                `[data-cell-id="${CSS.escape(targetCellId)}"] .cm-content`
+              );
+              store.acceptInlineAI(targetCellId, true);
+              window.requestAnimationFrame(() => {
+                if (editor?.isConnected) editor.focus();
+              });
+              return;
+            }
+          }
+        }
+      }
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
@@ -296,9 +371,10 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
       } else if (lowerKey === 'v' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         pasteCellBelow(curCell.id);
-      } else if (lowerKey === 'z' && !e.ctrlKey && !e.metaKey) {
+      } else if (lowerKey === 'z' && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
-        undoDeleteCell();
+        if (e.shiftKey) redoDeleteCell();
+        else undoDeleteCell();
       } else if (lowerKey === 'l' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         toggleLineNumbers();
@@ -333,6 +409,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
     pasteCellBelow,
     deleteCell,
     undoDeleteCell,
+    redoDeleteCell,
     toggleLineNumbers,
     toggleCellOutputCollapse,
     restartKernel,
@@ -418,9 +495,28 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
           )}
 
         </div>
+
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => toggleMinimap()}
+            aria-pressed={showMinimap}
+            aria-label={showMinimap ? 'Ocultar minimapa' : 'Mostrar minimapa'}
+            title={showMinimap ? 'Ocultar minimapa' : 'Mostrar minimapa'}
+            className="h-7 px-2 rounded-[3px] text-xs flex items-center gap-1.5 hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] transition-colors cursor-pointer"
+            style={{
+              backgroundColor: showMinimap ? 'var(--sat-accent-soft)' : 'transparent',
+              color: showMinimap ? 'var(--sat-accent)' : 'var(--sat-text-secondary)',
+            }}
+          >
+            <MapIcon size={13} />
+            <span className="hidden md:inline">Minimapa</span>
+          </button>
+        </div>
       </div>
 
-      {/* Scrollable Cells Canvas */}
+      {/* Scrollable Cells Canvas + Optional Minimap */}
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
       <div
         data-notebook-scroll
         ref={scrollContainerRef}
@@ -434,16 +530,18 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
           if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
           selectCell('', 'command');
         }}
-        className="flex-1 overflow-y-auto px-3 md:px-5 py-3"
+        className="flex-1 min-w-0 overflow-y-auto px-3 md:px-5 py-3.5"
         style={{ backgroundColor: 'var(--sat-bg-canvas)' }}
       >
         <div
           className={`notebook-cells-list ${
             notebookLayout === 'expanded' ? 'w-full max-w-none' : 'max-w-6xl mx-auto'
-          } pb-28 space-y-2.5`}
+          } pb-28 space-y-3`}
         >
-          {visibleCells.map((cell) => (
+          {visibleCells.map((cell, index) => (
             <NotebookCell
+              previousId={visibleCells[index - 1]?.id}
+              nextId={visibleCells[index + 1]?.id}
               key={cell.id}
               cell={cell}
               isActive={isActivePane && cell.id === tab.activeCellId}
@@ -485,6 +583,21 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
             </button>
           </div>
         </div>
+      </div>
+
+      {showMinimap && (
+        <NotebookMinimap
+          scrollContainerRef={scrollContainerRef}
+          cells={visibleCells}
+          activeCellId={tab.activeCellId}
+          notebookMode={notebookMode}
+          width={minimapWidth}
+          showOutputs={minimapShowOutputs}
+          isVisible={isVisible}
+          onSelectCell={(cellId) => selectCell(cellId, 'command', true)}
+          onResizeWidth={setMinimapWidth}
+        />
+      )}
       </div>
     </div>
   );

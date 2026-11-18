@@ -104,6 +104,8 @@ export interface SaturnoConfig {
   theme: string;
   default_ai_apply_mode?: 'replace_cell' | 'append_cell';
   include_kernel_variables: boolean;
+  output_format?: "formatted" | "original";
+  output_height?: number;
   output_display?: 'expanded' | 'limited' | 'collapsed';
   notebook_layout?: 'centered' | 'expanded';
   sidebar_position?: 'left' | 'right';
@@ -115,6 +117,9 @@ export interface SaturnoConfig {
   auto_save?: boolean;
   auto_save_delay?: number;
   editor_font_size?: number;
+  show_minimap?: boolean;
+  minimap_width?: number;
+  minimap_show_outputs?: boolean;
   table_output?: Partial<TableOutputSettings>;
   providers: Record<string, ProviderConfig>;
   codex_status?: {
@@ -127,6 +132,7 @@ export interface SaturnoConfig {
 export interface InlineAIState {
   isOpen: boolean;
   prompt: string;
+  submittedPrompt?: string;
   status: 'idle' | 'streaming' | 'preview' | 'error';
   streamedCode: string;
   errorMessage?: string;
@@ -142,11 +148,13 @@ export interface InlineAIState {
 
 export interface OpenNotebookTab {
   kind: 'notebook';
+  instanceId?: string;
   loading?: boolean;
   id: string; // path
   path: string;
   name: string;
   cells: NotebookCellData[];
+  redoDeletedCellIds?: string[];
   metadata: Record<string, any>;
   dirty: boolean;
   diskModified?: string;
@@ -157,6 +165,7 @@ export interface OpenNotebookTab {
 
 export interface OpenTextFileTab {
   kind: 'file';
+  instanceId?: string;
   loading?: boolean;
   id: string;
   path: string;
@@ -169,6 +178,7 @@ export interface OpenTextFileTab {
 
 export interface LauncherTab {
   kind: 'launcher';
+  instanceId?: string;
   id: '__launcher__';
   name: 'Launcher';
 }

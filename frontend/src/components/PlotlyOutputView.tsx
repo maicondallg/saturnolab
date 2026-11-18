@@ -18,7 +18,12 @@ let plotlyModulePromise: Promise<any> | null = null;
 
 function loadPlotly(): Promise<any> {
   if (!plotlyModulePromise) {
-    plotlyModulePromise = import('plotly.js-dist-min').then((mod) => mod.default || mod);
+    plotlyModulePromise = import('plotly.js-dist-min')
+      .then((mod) => mod.default || mod)
+      .catch((err) => {
+        plotlyModulePromise = null;
+        throw err;
+      });
   }
   return plotlyModulePromise;
 }
@@ -410,7 +415,7 @@ export const PlotlyOutputView: React.FC<Props> = React.memo(({ spec, outputLimit
   return (
     <div
       data-plotly-output="true"
-      className="sat-plotly-card w-full min-w-0 rounded-[4px] border overflow-hidden"
+      className="sat-plotly-card relative isolate w-full min-w-0 rounded-[4px] border overflow-hidden"
       style={{
         backgroundColor: 'var(--sat-cell-bg)',
         borderColor: 'var(--sat-border)',

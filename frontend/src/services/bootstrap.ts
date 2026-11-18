@@ -15,6 +15,9 @@ export function persistAppearance(config: SaturnoConfig) {
       saturno_font_size: config.editor_font_size,
       saturno_auto_save: config.auto_save,
       saturno_auto_save_delay: config.auto_save_delay,
+      saturno_show_minimap: config.show_minimap,
+      saturno_minimap_width: config.minimap_width,
+      saturno_minimap_show_outputs: config.minimap_show_outputs,
     };
     for (const [key, value] of Object.entries(values)) {
       if (value !== undefined) localStorage.setItem(key, String(value));

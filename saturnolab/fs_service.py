@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import nbformat
+
+from .output_preview import PREVIEW_MIME, build_preview
 
 _VALID_CELL_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
@@ -36,35 +39,90 @@ def safe_resolve(workspace_root: Path, rel_path: str = "") -> Path:
     return target
 
 
+def safe_resolve_lexical(workspace_root: Path, rel_path: str = "") -> Path:
+    """Resolve parent directories within workspace_root without dereferencing the final symlink."""
+    root = workspace_root.resolve()
+    cleaned = rel_path.replace("\\", "/").lstrip("/").strip()
+    if not cleaned or cleaned == ".":
+        return root
+    parts = [p for p in cleaned.split("/") if p and p != "."]
+    if not parts or any(p == ".." for p in parts):
+        # Fall back to strict resolved check for '..' paths
+        resolved = (root / cleaned).resolve()
+        if resolved != root and root not in resolved.parents:
+            raise PermissionError("Acesso fora do diretório de trabalho não permitido.")
+        return resolved
+    parent_rel = "/".join(parts[:-1])
+    parent_resolved = (root / parent_rel).resolve() if parent_rel else root
+    if parent_resolved != root and root not in parent_resolved.parents:
+        raise PermissionError("Acesso fora do diretório de trabalho não permitido.")
+    return parent_resolved / parts[-1]
+
+
 def _scan_dir_entries(
-    root_resolved: Path, target: Path, recursive: bool = True, depth: int = 0, max_depth: int = 6
+    root_resolved: Path,
+    target: Path,
+    rel_prefix: str = "",
+    recursive: bool = True,
+    depth: int = 0,
+    max_depth: int = 6,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     try:
         # DirEntry caches file metadata; filter ignored entries before any stat.
         with os.scandir(target) as scan:
-            entries = [entry for entry in scan
-                       if entry.name not in IGNORED_NAMES and not entry.name.startswith(".DS_Store")]
+            entries = [
+                entry
+                for entry in scan
+                if entry.name not in IGNORED_NAMES and not entry.name.startswith(".DS_Store")
+            ]
     except OSError:
         return items
 
     for entry in entries:
         try:
-            stat = entry.stat()
-            is_dir = entry.is_dir()
+            is_link = entry.is_symlink()
+            if is_link:
+                try:
+                    resolved_entry = Path(entry.path).resolve()
+                    within_workspace = (
+                        resolved_entry == root_resolved or root_resolved in resolved_entry.parents
+                    )
+                except OSError:
+                    within_workspace = False
+                if within_workspace:
+                    try:
+                        stat = entry.stat(follow_symlinks=True)
+                        is_dir = entry.is_dir(follow_symlinks=True)
+                    except OSError:
+                        stat = entry.stat(follow_symlinks=False)
+                        is_dir = False
+                else:
+                    stat = entry.stat(follow_symlinks=False)
+                    is_dir = False
+            else:
+                stat = entry.stat()
+                is_dir = entry.is_dir(follow_symlinks=False)
+
             ext = Path(entry.name).suffix.lower() if not is_dir else ""
             item_type = "directory" if is_dir else ("notebook" if ext == ".ipynb" else "file")
+            entry_rel_path = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
             item_dict: dict[str, Any] = {
                 "name": entry.name,
-                "path": str(Path(entry.path).relative_to(root_resolved)).replace("\\", "/"),
+                "path": entry_rel_path,
                 "type": item_type,
                 "extension": ext,
                 "size": 0 if is_dir else stat.st_size,
                 "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
             }
-            if is_dir and recursive and depth < max_depth:
+            if is_dir and not is_link and recursive and depth < max_depth:
                 item_dict["children"] = _scan_dir_entries(
-                    root_resolved, Path(entry.path), recursive=True, depth=depth + 1, max_depth=max_depth
+                    root_resolved,
+                    Path(entry.path),
+                    rel_prefix=entry_rel_path,
+                    recursive=True,
+                    depth=depth + 1,
+                    max_depth=max_depth,
                 )
             elif is_dir:
                 item_dict["children"] = []
@@ -85,13 +143,18 @@ def list_directory(
     if not target.is_dir():
         raise ValueError(f"Não é um diretório: {rel_path}")
 
-    items = _scan_dir_entries(root_resolved, target, recursive=recursive)
+    current_rel = (
+        ""
+        if target == root_resolved
+        else str(target.relative_to(root_resolved)).replace("\\", "/")
+    )
+    items = _scan_dir_entries(
+        root_resolved, target, rel_prefix=current_rel, recursive=recursive
+    )
 
     return {
         "workspace_root": str(root_resolved),
-        "current_path": ""
-        if target == root_resolved
-        else str(target.relative_to(root_resolved)).replace("\\", "/"),
+        "current_path": current_rel,
         "items": items,
     }
 
@@ -166,6 +229,17 @@ def _serialize_output(out: Any) -> dict[str, Any]:
                 clean_data[mime] = val
             else:
                 clean_data[mime] = _normalize_source(val)
+        # Older kernels only persisted the Python representation. Recover complete,
+        # small container literals without executing notebook code.
+        plain = clean_data.get("text/plain", "")
+        if (len(clean_data) == 1 and isinstance(plain, str) and 1 < len(plain) <= 8192
+                and plain[0] in "[{(" and "..." not in plain):
+            try:
+                value = ast.literal_eval(plain)
+                if isinstance(value, (list, dict, tuple, set)):
+                    clean_data[PREVIEW_MIME] = build_preview(value)
+            except (ValueError, SyntaxError, RecursionError, TypeError):
+                pass
         return {
             "output_type": out_type,
             "data": clean_data,
@@ -252,9 +326,10 @@ def read_notebook(workspace_root: Path, rel_path: str) -> dict[str, Any]:
             nb_obj = nbformat.reads(raw_text, as_version=4)
             raw_nb = {"cells": nb_obj.cells, "metadata": dict(nb_obj.metadata)}
 
+    used_ids: set[str] = set()
     cells: list[dict[str, Any]] = []
     for c in raw_nb.get("cells", []):
-        cell_id = c.get("id") or uuid.uuid4().hex[:8]
+        cell_id = _sanitize_cell_id(c.get("id"), used_ids)
         cell_type = c.get("cell_type", "code")
         if cell_type not in ("code", "markdown"):
             cell_type = "code"
@@ -372,12 +447,14 @@ def create_notebook(
     folder.mkdir(parents=True, exist_ok=True)
 
     if filename:
-        if "/" in filename or "\\" in filename:
+        clean_filename = filename.strip()
+        if not clean_filename or clean_filename in (".", "..") or "/" in clean_filename or "\\" in clean_filename:
             raise ValueError("Use apenas o nome do notebook.")
+        filename = clean_filename
         if not filename.endswith(".ipynb"):
             filename += ".ipynb"
         candidate = folder / filename
-        if candidate.exists():
+        if candidate.exists() or candidate.is_symlink():
             raise FileExistsError(f"Já existe '{filename}' nesta pasta.")
     else:
         idx = 1
@@ -407,8 +484,8 @@ def create_folder(workspace_root: Path, folder_rel_path: str, name: str) -> dict
         raise ValueError("Use apenas o nome da nova pasta.")
     parent = safe_resolve(workspace_root, folder_rel_path)
     parent.mkdir(parents=True, exist_ok=True)
-    new_dir = safe_resolve(workspace_root, str(Path(folder_rel_path) / clean_name))
-    if new_dir.exists():
+    new_dir = safe_resolve_lexical(workspace_root, str(Path(folder_rel_path) / clean_name))
+    if new_dir.exists() or new_dir.is_symlink():
         raise FileExistsError(f"Já existe '{clean_name}' nesta pasta.")
     new_dir.mkdir(parents=True, exist_ok=False)
     return {
@@ -417,33 +494,45 @@ def create_folder(workspace_root: Path, folder_rel_path: str, name: str) -> dict
     }
 
 
-def rename_entry(workspace_root: Path, old_rel_path: str, new_name: str) -> dict[str, Any]:
-    src = safe_resolve(workspace_root, old_rel_path)
-    if not src.exists():
+def plan_rename_entry(workspace_root: Path, old_rel_path: str, new_name: str) -> tuple[Path, Path]:
+    root_resolved = workspace_root.resolve()
+    src = safe_resolve_lexical(workspace_root, old_rel_path)
+    if src == root_resolved:
+        raise PermissionError("Não é possível renomear o diretório raiz.")
+    if not src.exists() and not src.is_symlink():
         raise FileNotFoundError(f"Item não encontrado: {old_rel_path}")
-    if "/" in new_name or "\\" in new_name:
+    clean_new = new_name.strip()
+    if not clean_new or clean_new in (".", "..") or "/" in clean_new or "\\" in clean_new:
         raise ValueError("Use apenas o novo nome do arquivo ou diretório.")
-    dst = src.parent / new_name
-    dst_resolved = dst.resolve()
-    if workspace_root.resolve() not in dst_resolved.parents:
+    dst = src.parent / clean_new
+    if root_resolved != src.parent and root_resolved not in src.parent.parents:
         raise PermissionError("Destino inválido.")
-    if dst_resolved.exists():
-        raise FileExistsError(f"Já existe um item chamado '{new_name}'.")
-    src.rename(dst_resolved)
+    if dst.exists() or dst.is_symlink():
+        raise FileExistsError(f"Já existe um item chamado '{clean_new}'.")
+    return src, dst
+
+
+def rename_entry(workspace_root: Path, old_rel_path: str, new_name: str) -> dict[str, Any]:
+    root_resolved = workspace_root.resolve()
+    src, dst = plan_rename_entry(workspace_root, old_rel_path, new_name)
+    src.rename(dst)
     return {
         "old_path": old_rel_path,
-        "new_path": str(dst_resolved.relative_to(workspace_root.resolve())).replace("\\", "/"),
-        "name": dst_resolved.name,
+        "new_path": str(dst.relative_to(root_resolved)).replace("\\", "/"),
+        "name": dst.name,
     }
 
 
 def delete_entry(workspace_root: Path, rel_path: str) -> dict[str, Any]:
-    target = safe_resolve(workspace_root, rel_path)
-    if target == workspace_root.resolve():
+    root_resolved = workspace_root.resolve()
+    target = safe_resolve_lexical(workspace_root, rel_path)
+    if target == root_resolved:
         raise PermissionError("Não é possível remover o diretório raiz.")
-    if not target.exists():
+    if not target.exists() and not target.is_symlink():
         raise FileNotFoundError(f"Item não encontrado: {rel_path}")
-    if target.is_dir():
+    if target.is_symlink():
+        target.unlink()
+    elif target.is_dir():
         shutil.rmtree(target)
     else:
         target.unlink()
@@ -485,14 +574,14 @@ def create_text_file(
     folder = safe_resolve(workspace_root, folder_rel_path)
     folder.mkdir(parents=True, exist_ok=True)
     name = filename.strip() or "script.py"
-    if "/" in name or "\\" in name:
+    if name in (".", "..") or "/" in name or "\\" in name:
         raise ValueError("Use apenas o nome do arquivo.")
     candidate = folder / name
-    if candidate.exists():
+    if candidate.exists() or candidate.is_symlink():
         stem = candidate.stem
         suffix = candidate.suffix
         idx = 1
-        while candidate.exists():
+        while candidate.exists() or candidate.is_symlink():
             candidate = folder / f"{stem}_{idx}{suffix}"
             idx += 1
     candidate.write_text("", encoding="utf-8")
@@ -510,19 +599,19 @@ def plan_move_entries(
 
     planned: list[tuple[Path, Path, str]] = []
     for rel_path in sorted(set(paths), key=len):
-        src = safe_resolve(workspace_root, rel_path)
-        if not src.exists() or src == root_resolved:
+        src = safe_resolve_lexical(workspace_root, rel_path)
+        if src == root_resolved or (not src.exists() and not src.is_symlink()):
             raise ValueError("Origem inválida.")
         if any(parent == src or parent in src.parents for parent, _, _ in planned):
             continue
-        if src.is_dir() and (dst_dir == src or src in dst_dir.parents):
+        if not src.is_symlink() and src.is_dir() and (dst_dir == src or src in dst_dir.parents):
             raise ValueError(f"Não é possível mover a pasta '{src.name}' para dentro dela mesma.")
-        dst = (dst_dir / src.name).resolve()
+        dst = dst_dir / src.name
         if dst == src:
             continue
-        if root_resolved not in dst.parents:
+        if root_resolved != dst_dir and root_resolved not in dst_dir.parents:
             raise PermissionError("Destino fora do diretório de trabalho.")
-        if dst.exists() or any(target == dst for _, target, _ in planned):
+        if dst.exists() or dst.is_symlink() or any(target == dst for _, target, _ in planned):
             raise FileExistsError(f"Já existe '{src.name}' na pasta de destino.")
         planned.append((src, dst, rel_path))
     return planned
@@ -550,12 +639,14 @@ def delete_entries(workspace_root: Path, paths: list[str]) -> dict[str, Any]:
     # Sort shortest paths first so parent directories are removed cleanly
     for rel_path in sorted(set(paths), key=len):
         try:
-            target = safe_resolve(workspace_root, rel_path)
+            target = safe_resolve_lexical(workspace_root, rel_path)
         except PermissionError:
             continue
-        if target == root_resolved or not target.exists():
+        if target == root_resolved or (not target.exists() and not target.is_symlink()):
             continue
-        if target.is_dir():
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir():
             shutil.rmtree(target)
         else:
             target.unlink()
@@ -570,21 +661,21 @@ def copy_entries(workspace_root: Path, paths: list[str], target_folder: str = ""
         raise ValueError("Pasta de destino inválida.")
     sources = []
     for path in sorted(set(paths), key=len):
-        source = safe_resolve(root, path)
-        if source == root or not source.exists():
+        source = safe_resolve_lexical(root, path)
+        if source == root or (not source.exists() and not source.is_symlink()):
             raise ValueError("Origem inválida.")
         if any(parent == source or parent in source.parents for parent in sources):
             continue
+        if source.is_symlink() or (source.is_dir() and any(p.is_symlink() for p in source.rglob("*"))):
+            raise ValueError("A cópia de links simbólicos não é suportada.")
         if source.is_dir() and (source == destination or source in destination.parents):
             raise ValueError("Não é possível copiar uma pasta para dentro dela mesma.")
-        if source.is_symlink() or (source.is_dir() and any(p.is_symlink() for p in source.rglob('*'))):
-            raise ValueError("A cópia de links simbólicos não é suportada.")
         sources.append(source)
     copied = []
     for source in sources:
         target = destination / source.name
         counter = 1
-        while target.exists():
+        while target.exists() or target.is_symlink():
             if source.is_dir():
                 target = destination / f"{source.name}_copy{counter}"
             else:

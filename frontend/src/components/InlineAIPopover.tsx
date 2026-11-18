@@ -9,7 +9,10 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { useSaturnoStore } from '../store/useSaturnoStore';
+import {
+  isInlineAIPromptEdited,
+  useSaturnoStore,
+} from '../store/useSaturnoStore';
 import { InlineAIState } from '../types/notebook';
 
 interface Props {
@@ -43,7 +46,12 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
 
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const lastSubmittedPromptRef = useRef<string>('');
+  const lastSubmittedPromptRef = useRef<string>(
+    aiState.submittedPrompt ??
+      (aiState.status === 'streaming' || aiState.status === 'preview'
+        ? aiState.prompt.trim()
+        : '')
+  );
 
   const stateRef = useRef({
     aiState,
@@ -59,10 +67,12 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
   }, [aiState.isOpen]);
 
   useEffect(() => {
-    if (aiState.status === 'streaming') {
+    if (aiState.submittedPrompt !== undefined) {
+      lastSubmittedPromptRef.current = aiState.submittedPrompt;
+    } else if (aiState.status === 'streaming') {
       lastSubmittedPromptRef.current = aiState.prompt.trim();
     }
-  }, [aiState.status, aiState.prompt]);
+  }, [aiState.status, aiState.prompt, aiState.submittedPrompt]);
 
   const restoreEditorFocus = () => {
     const editor = rootRef.current?.closest('[data-cell-id]')
@@ -107,13 +117,21 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
     submitInlineAI(cellId);
   };
 
+  const isPromptEdited = (cur: InlineAIState) =>
+    cur.submittedPrompt !== undefined
+      ? isInlineAIPromptEdited(cur)
+      : cur.status === 'preview' && cur.prompt.trim() !== lastSubmittedPromptRef.current;
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.defaultPrevented || e.nativeEvent.isComposing) return;
     const inPrompt = e.target === inputRef.current;
     const cur = stateRef.current.aiState;
-    const promptEditedAfterPreview =
+    const promptEditedAfterPreview = isPromptEdited(cur);
+    const canAccept =
       cur.status === 'preview' &&
-      cur.prompt.trim() !== lastSubmittedPromptRef.current;
+      Boolean(cur.streamedCode.trim()) &&
+      !promptEditedAfterPreview;
+    const isEnter = e.key === 'Enter' || e.key === '\n' || e.key === '\r';
 
     if (e.key === 'Tab' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey &&
         inPrompt && (cur.selection || stateRef.current.hasExistingCode) &&
@@ -127,9 +145,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
     if (
       e.key === 'Tab' &&
       !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey &&
-      inPrompt && !promptEditedAfterPreview &&
-      cur.status === 'preview' &&
-      cur.streamedCode.trim()
+      inPrompt && canAccept
     ) {
       e.preventDefault();
       e.stopPropagation();
@@ -148,14 +164,10 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
       return;
     }
 
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+    if (isEnter && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();
-      if (
-        cur.status === 'preview' &&
-        cur.streamedCode.trim() &&
-        !promptEditedAfterPreview
-      ) {
+      if (canAccept) {
         accept(true);
       } else if (cur.prompt.trim() && cur.status !== 'streaming') {
         triggerSubmit();
@@ -163,14 +175,10 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
       return;
     }
 
-    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && inPrompt) {
+    if (isEnter && !e.shiftKey && !e.altKey && inPrompt) {
       e.preventDefault();
       e.stopPropagation();
-      if (
-        cur.status === 'preview' &&
-        cur.streamedCode.trim() &&
-        !promptEditedAfterPreview
-      ) {
+      if (canAccept) {
         accept(false);
       } else if (cur.status !== 'streaming' && cur.prompt.trim()) {
         triggerSubmit();
@@ -178,9 +186,7 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
     }
   };
 
-  const promptChangedSincePreview =
-    aiState.status === 'preview' &&
-    aiState.prompt.trim() !== lastSubmittedPromptRef.current;
+  const promptChangedSincePreview = isPromptEdited(aiState);
 
   const showModeSelector = Boolean(aiState.selection) || hasExistingCode;
 
@@ -268,9 +274,10 @@ export const InlineAIPopover: React.FC<Props> = React.memo(({
     <div
       ref={rootRef}
       data-inline-ai
+      tabIndex={-1}
       onKeyDown={onKeyDown}
       onClick={(e) => e.stopPropagation()}
-      className="border-b transition-colors"
+      className="border-b rounded-t-[3px] transition-colors focus:outline-none"
       style={{
         backgroundColor: 'var(--sat-ai-bg)',
         borderColor: 'var(--sat-ai-border)',

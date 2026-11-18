@@ -20,6 +20,11 @@ const sessionKey = (root: string) => `saturno_session_v1:${root}`;
 let lastWritten = '';
 let lastRoot = '';
 
+function makeTabInstanceId(kind: WorkspaceTab['kind']): string {
+  if (kind === 'launcher') return '__launcher__';
+  return `tab_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 // Persist navigation only: notebook contents/outputs remain in their files.
 export function saveWorkspaceSession(state: WorkspaceState) {
   if (!state.workspaceRoot) return;
@@ -64,9 +69,10 @@ export function initialWorkspaceSession(root: string) {
   const tabs = new Map<string, WorkspaceTab>();
   for (const ref of session.tabs) {
     const name = ref.id.split('/').pop() || ref.id;
-    if (ref.kind === 'launcher') tabs.set(ref.id, { kind: 'launcher', id: '__launcher__', name: 'Launcher' });
-    else if (ref.kind === 'file') tabs.set(ref.id, { kind: 'file', id: ref.id, path: ref.id, name, dirty: false, loading: true, content: '' });
-    else tabs.set(ref.id, { kind: 'notebook', id: ref.id, path: ref.id, name, dirty: false, loading: true,
+    const instanceId = makeTabInstanceId(ref.kind);
+    if (ref.kind === 'launcher') tabs.set(ref.id, { kind: 'launcher', instanceId: '__launcher__', id: '__launcher__', name: 'Launcher' });
+    else if (ref.kind === 'file') tabs.set(ref.id, { kind: 'file', instanceId, id: ref.id, path: ref.id, name, dirty: false, loading: true, content: '' });
+    else tabs.set(ref.id, { kind: 'notebook', instanceId, id: ref.id, path: ref.id, name, dirty: false, loading: true,
       cells: [], metadata: {}, kernelStatus: 'not_started', variables: [], activeCellId: ref.activeCellId || '' });
   }
   return sessionLayout(session, tabs);
@@ -75,7 +81,11 @@ export function initialWorkspaceSession(root: string) {
 // Respect tab selection/closure during I/O without discarding loaded files or
 // replacing edits made to a different tab while restoration was running.
 export function reconcileRestoredSession(current: WorkspaceState, restored: Pick<WorkspaceState, 'tabs'>) {
-  const tabs = new Map(restored.tabs.map(tab => [tab.id, tab]));
+  const existingById = new Map(current.tabs.map(tab => [tab.id, tab]));
+  const tabs = new Map(restored.tabs.map(tab => {
+    const prev = existingById.get(tab.id);
+    return [tab.id, prev?.instanceId ? { ...tab, instanceId: prev.instanceId } : tab];
+  }));
   for (const tab of current.tabs) {
     if (tab.kind === 'launcher' || !tab.loading) tabs.set(tab.id, tab);
   }
@@ -104,7 +114,7 @@ export async function restoreWorkspaceSession(root: string, collapseOutputs: boo
       const ref = session.tabs[next++];
       try {
         if (ref.kind === 'launcher') {
-          loaded.set(ref.id, { kind: 'launcher', id: '__launcher__', name: 'Launcher' });
+          loaded.set(ref.id, { kind: 'launcher', instanceId: '__launcher__', id: '__launcher__', name: 'Launcher' });
         } else if (ref.kind === 'file') {
           const [file] = await Promise.all([api.readFile(ref.id), loadTextFileView()]);
           const diskContent = file.content.replace(/\r\n/g, '\n');
@@ -118,6 +128,7 @@ export async function restoreWorkspaceSession(root: string, collapseOutputs: boo
           if (reconciled.restored) recovered.push(file.name);
           loaded.set(ref.id, {
             kind: 'file',
+            instanceId: makeTabInstanceId('file'),
             id: ref.id,
             path: file.path,
             name: file.name,
@@ -144,10 +155,27 @@ export async function restoreWorkspaceSession(root: string, collapseOutputs: boo
             collapseOutputs,
           });
           if (reconciled.restored) recovered.push(notebook.name);
-          const cells = reconciled.cells;
+          const inFlightId = notebook.active_cell_id || null;
+          const cells = inFlightId
+            ? reconciled.cells.map(c =>
+                c.id === inFlightId
+                  ? {
+                      ...c,
+                      isRunning: true,
+                      execution_count:
+                        notebook.active_execution_count !== undefined &&
+                        notebook.active_execution_count !== null
+                          ? notebook.active_execution_count
+                          : c.execution_count,
+                      outputs: notebook.active_outputs || c.outputs,
+                    }
+                  : c
+              )
+            : reconciled.cells;
           const preferredCellId = reconciled.activeCellId || ref.activeCellId;
           loaded.set(ref.id, {
             kind: 'notebook',
+            instanceId: makeTabInstanceId('notebook'),
             id: ref.id,
             path: notebook.path,
             name: notebook.name,
@@ -183,7 +211,7 @@ function sessionLayout(session: Session, loaded: Map<string, WorkspaceTab>) {
     });
   }
   if (!panes.length) {
-    if (!loaded.size) loaded.set('__launcher__', { kind: 'launcher', id: '__launcher__', name: 'Launcher' });
+    if (!loaded.size) loaded.set('__launcher__', { kind: 'launcher', instanceId: '__launcher__', id: '__launcher__', name: 'Launcher' });
     const tabIds = [...loaded.keys()];
     panes.push({ id: 'pane_main', tabIds, activeTabId: tabIds[0], widthRatio: 1 });
   }

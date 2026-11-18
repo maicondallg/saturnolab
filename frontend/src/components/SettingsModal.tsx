@@ -1,9 +1,11 @@
 import { useShallow } from 'zustand/react/shallow';
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Check,
   Columns2,
   Keyboard,
+  Map as MapIcon,
   Maximize2,
   Minimize2,
   Palette,
@@ -36,6 +38,12 @@ export const SettingsModal: React.FC = React.memo(() => {
     setSidebarPosition,
     sidebarWidth,
     setSidebarWidth,
+    showMinimap,
+    setShowMinimap,
+    minimapWidth,
+    setMinimapWidth,
+    minimapShowOutputs,
+    setMinimapShowOutputs,
     editorFontSize,
     setEditorFontSize,
     showLineNumbers,
@@ -66,6 +74,12 @@ export const SettingsModal: React.FC = React.memo(() => {
     setSidebarPosition: s.setSidebarPosition,
     sidebarWidth: s.sidebarWidth,
     setSidebarWidth: s.setSidebarWidth,
+    showMinimap: s.showMinimap,
+    setShowMinimap: s.setShowMinimap,
+    minimapWidth: s.minimapWidth,
+    setMinimapWidth: s.setMinimapWidth,
+    minimapShowOutputs: s.minimapShowOutputs,
+    setMinimapShowOutputs: s.setMinimapShowOutputs,
     editorFontSize: s.editorFontSize,
     setEditorFontSize: s.setEditorFontSize,
     showLineNumbers: s.showLineNumbers,
@@ -176,6 +190,7 @@ export const SettingsModal: React.FC = React.memo(() => {
         { desc: 'Interromper execução do Kernel', keys: 'I, I' },
         { desc: 'Excluir célula selecionada', keys: 'D, D  ou  Ctrl+Shift+⌫' },
         { desc: 'Desfazer última exclusão de célula', keys: 'Z' },
+        { desc: 'Refazer exclusão de célula', keys: 'Shift + Z' },
         { desc: 'Alternar números de linha', keys: 'L' },
         { desc: 'Recolher / expandir saída da célula', keys: 'O' },
         { desc: 'Entrar na célula para editar', keys: 'Enter' },
@@ -190,6 +205,7 @@ export const SettingsModal: React.FC = React.memo(() => {
       items: [
         { desc: 'Autocompletar código, métodos e colunas (sem IA)', keys: 'Tab' },
         { desc: 'Abrir documentação rápida do método/função (Docstring)', keys: 'Shift + Tab' },
+        { desc: 'Refazer edição de texto', keys: 'Ctrl + Y  /  Ctrl + Shift + Z' },
         { desc: 'Localizar e substituir dentro da célula', keys: 'Ctrl + F  /  Ctrl + H' },
         { desc: 'Mostrar / esconder barra lateral (Arquivos e Variáveis)', keys: 'Ctrl + B' },
         { desc: 'Fechar aba rapidamente', keys: 'Clique do Meio (Scroll)' },
@@ -215,15 +231,15 @@ export const SettingsModal: React.FC = React.memo(() => {
     },
   ];
 
-  return (
+  return createPortal(
     <div
       data-modal-root="true"
       onClick={closeSettings}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-[140] flex items-center justify-center bg-black/60 p-2 sm:p-4"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-3xl rounded-[4px] shadow-2xl border overflow-hidden h-[82vh] max-h-[680px] flex flex-col"
+        className="w-full max-w-3xl rounded-[4px] shadow-2xl border overflow-hidden h-[88vh] sm:h-[82vh] max-h-[680px] flex flex-col"
         style={{
           backgroundColor: 'var(--sat-bg-surface)',
           borderColor: 'var(--sat-border)',
@@ -232,26 +248,26 @@ export const SettingsModal: React.FC = React.memo(() => {
       >
         {/* Modal Header */}
         <div
-          className="px-5 py-3 border-b flex items-center justify-between shrink-0"
+          className="px-4 sm:px-5 py-3 border-b flex items-center justify-between shrink-0"
           style={{ borderColor: 'var(--sat-border)' }}
         >
-          <div className="flex items-center gap-2">
-            <Settings size={15} style={{ color: 'var(--sat-accent)' }} />
-            <h3 className="font-semibold text-sm m-0">Configurações do SaturnoLab</h3>
+          <div className="flex items-center gap-2 min-w-0">
+            <Settings size={15} className="shrink-0" style={{ color: 'var(--sat-accent)' }} />
+            <h3 className="font-semibold text-sm m-0 truncate">Configurações do SaturnoLab</h3>
           </div>
           <button
             onClick={closeSettings}
-            className="sat-icon-btn p-1"
+            className="sat-icon-btn p-1 shrink-0"
           >
             <X size={16} />
           </button>
         </div>
 
         {/* Body: Left Nav + Right Content */}
-        <div className="flex-1 flex min-h-0 overflow-hidden">
-          {/* Left Navigation */}
+        <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
+          {/* Navigation (horizontal tabs on mobile, vertical sidebar on md+) */}
           <nav
-            className="w-52 border-r p-2.5 space-y-1 shrink-0 select-none overflow-y-auto"
+            className="w-full md:w-52 border-b md:border-b-0 md:border-r p-2 md:p-2.5 flex md:flex-col gap-1 md:gap-0 md:space-y-1 shrink-0 select-none overflow-x-auto md:overflow-x-hidden md:overflow-y-auto no-scrollbar"
             style={{
               backgroundColor: 'var(--sat-bg-subtle)',
               borderColor: 'var(--sat-border)',
@@ -264,13 +280,11 @@ export const SettingsModal: React.FC = React.memo(() => {
                   key={item.id}
                   type="button"
                   onClick={() => openSettings(item.id)}
-                  className="w-full px-3 py-2 rounded-[3px] text-xs font-medium flex items-center gap-2.5 text-left transition-colors cursor-pointer"
+                  className="shrink-0 md:w-full whitespace-nowrap px-3 py-2 rounded-[3px] text-xs font-medium flex items-center gap-2 text-left transition-colors cursor-pointer border-b-2 md:border-b-0 md:border-l-2"
                   style={{
                     backgroundColor: active ? 'var(--sat-bg-surface)' : 'transparent',
                     color: active ? 'var(--sat-text-primary)' : 'var(--sat-text-secondary)',
-                    borderLeft: active
-                      ? '2px solid var(--sat-accent)'
-                      : '2px solid transparent',
+                    borderColor: active ? 'var(--sat-accent)' : 'transparent',
                   }}
                 >
                   <span style={{ color: active ? 'var(--sat-accent)' : 'inherit' }}>
@@ -283,7 +297,7 @@ export const SettingsModal: React.FC = React.memo(() => {
           </nav>
 
           {/* Right Panel Content */}
-          <div className="flex-1 overflow-y-auto p-6 text-xs">
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 text-xs">
             {/* 1. APARÊNCIA & LAYOUT */}
             {settingsSection === 'appearance' && (
               <div className="space-y-6">
@@ -352,7 +366,7 @@ export const SettingsModal: React.FC = React.memo(() => {
                       Defina se as células do notebook ficam centralizadas na página ou ocupam toda a largura disponível.
                     </p>
                   </div>
-                  <div className="grid grid-cols-2 gap-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <button
                       type="button"
                       onClick={() => setNotebookLayout('centered')}
@@ -422,7 +436,7 @@ export const SettingsModal: React.FC = React.memo(() => {
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <button
                       type="button"
                       onClick={() => setSidebarPosition('left')}
@@ -498,9 +512,113 @@ export const SettingsModal: React.FC = React.memo(() => {
                       max={600}
                       step={4}
                       value={sidebarWidth}
-                      onChange={(e) => setSidebarWidth(Number(e.target.value), true)}
+                      onChange={(e) => setSidebarWidth(Number(e.target.value), false)}
+                      onPointerUp={(e) => setSidebarWidth(Number(e.currentTarget.value), true)}
+                      onKeyUp={(e) => setSidebarWidth(Number(e.currentTarget.value), true)}
                       className="w-full cursor-pointer accent-amber-600"
                     />
+                  </div>
+                </div>
+
+                <div
+                  className="pt-5 border-t space-y-3"
+                  style={{ borderColor: 'var(--sat-border)' }}
+                >
+                  <div className="flex items-center gap-2">
+                    <MapIcon size={15} style={{ color: 'var(--sat-accent)' }} />
+                    <div>
+                      <h4 className="text-sm font-semibold m-0">
+                        Minimapa (Scroll &amp; Miniview)
+                      </h4>
+                      <p className="m-0 mt-0.5" style={{ color: 'var(--sat-text-muted)' }}>
+                        Visão em miniatura na lateral direita para navegar rapidamente pelo notebook e arquivos de código.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div
+                    className="p-3.5 rounded-[4px] border space-y-3"
+                    style={{
+                      backgroundColor: 'var(--sat-bg-subtle)',
+                      borderColor: 'var(--sat-border)',
+                    }}
+                  >
+                    <label className="flex items-start justify-between gap-4 cursor-pointer">
+                      <div>
+                        <div className="font-semibold text-xs">
+                          Exibir minimapa de navegação e miniview
+                        </div>
+                        <div
+                          className="text-[11.5px] mt-0.5"
+                          style={{ color: 'var(--sat-text-muted)' }}
+                        >
+                          Permite clicar, arrastar para rolar e ver prévias das células/linhas ao passar o mouse (você também pode alternar direto na barra superior).
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={showMinimap}
+                        onChange={(e) => setShowMinimap(e.target.checked)}
+                        className="w-4 h-4 mt-0.5 shrink-0 cursor-pointer"
+                      />
+                    </label>
+
+                    {showMinimap && (
+                      <>
+                        <div
+                          className="pt-2.5 border-t space-y-1.5"
+                          style={{ borderColor: 'var(--sat-border)' }}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium">
+                              Largura do Minimapa: <b className="font-mono">{minimapWidth}px</b>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setMinimapWidth(116, true)}
+                              className="text-[11px] px-2 py-0.5 rounded-[2px] border cursor-pointer hover:opacity-80"
+                              style={{ borderColor: 'var(--sat-border)' }}
+                            >
+                              Padrão (116px)
+                            </button>
+                          </div>
+                          <input
+                            type="range"
+                            min={72}
+                            max={200}
+                            step={4}
+                            value={minimapWidth}
+                            onChange={(e) => setMinimapWidth(Number(e.target.value), false)}
+                            onPointerUp={(e) => setMinimapWidth(Number(e.currentTarget.value), true)}
+                            onKeyUp={(e) => setMinimapWidth(Number(e.currentTarget.value), true)}
+                            className="w-full cursor-pointer accent-amber-600"
+                          />
+                        </div>
+
+                        <label
+                          className="pt-2.5 border-t flex items-start justify-between gap-4 cursor-pointer"
+                          style={{ borderColor: 'var(--sat-border)' }}
+                        >
+                          <div>
+                            <div className="font-medium text-xs">
+                              Exibir prévia de saídas no minimapa do notebook
+                            </div>
+                            <div
+                              className="text-[11px] mt-0.5"
+                              style={{ color: 'var(--sat-text-muted)' }}
+                            >
+                              Representa visualmente tabelas, gráficos, imagens e erros abaixo das células executadas.
+                            </div>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={minimapShowOutputs}
+                            onChange={(e) => setMinimapShowOutputs(e.target.checked)}
+                            className="w-4 h-4 mt-0.5 shrink-0 cursor-pointer"
+                          />
+                        </label>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -508,14 +626,14 @@ export const SettingsModal: React.FC = React.memo(() => {
                   className="pt-5 border-t space-y-2"
                   style={{ borderColor: 'var(--sat-border)' }}
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <h4 className="text-sm font-semibold m-0">Tamanho da Fonte do Código</h4>
                       <p className="m-0 mt-0.5" style={{ color: 'var(--sat-text-muted)' }}>
                         Tamanho da fonte nas células e arquivos de código (.py, .md, etc.)
                       </p>
                     </div>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       {[12, 13, 14, 15, 16, 18].map((sz) => (
                         <button
                           key={sz}
@@ -641,10 +759,24 @@ export const SettingsModal: React.FC = React.memo(() => {
                   />
                 </label>
 
-                <label className="p-3.5 rounded border flex items-center justify-between gap-4 text-sm" style={{ borderColor: 'var(--sat-border)' }}>
+                <label className="p-3.5 rounded border flex flex-wrap items-center justify-between gap-3 text-sm" style={{ borderColor: 'var(--sat-border)' }}>
+                  <span>Formato padrão das saídas</span>
+                  <select className="border rounded p-2 bg-[var(--sat-bg-surface)] max-w-full" style={{ borderColor: 'var(--sat-border)' }} value={config?.output_format || 'formatted'} onChange={e => void updateConfig({ output_format: e.target.value })}>
+                    <option value="formatted">Formatado</option><option value="original">Texto original</option>
+                  </select>
+                </label>
+                <label className="p-3.5 rounded border flex flex-wrap items-center justify-between gap-3 text-sm" style={{ borderColor: 'var(--sat-border)' }}>
+                  <span>Altura da saída limitada (px)</span>
+                  <input type="number" min={80} max={1600} className="w-20 border rounded p-2 bg-[var(--sat-bg-surface)]" style={{ borderColor: 'var(--sat-border)' }} key={config?.output_height} defaultValue={config?.output_height ?? 256}
+                    onBlur={e => { const height = e.currentTarget.valueAsNumber;
+                      if (e.currentTarget.validity.valid && Number.isInteger(height)) void updateConfig({ output_height: height });
+                      else e.currentTarget.value = String(config?.output_height ?? 256);
+                    }} />
+                </label>
+                <label className="p-3.5 rounded border flex flex-wrap items-center justify-between gap-3 text-sm" style={{ borderColor: 'var(--sat-border)' }}>
                   <span>Exibição padrão das saídas<br /><small>Ao abrir um notebook ou executar uma célula.</small></span>
                   <select value={config?.output_display || 'expanded'} onChange={e => void updateConfig({ output_display: e.target.value })}
-                    style={{ background: 'var(--sat-bg-surface)' }} className="border rounded p-2">
+                    style={{ background: 'var(--sat-bg-surface)', borderColor: 'var(--sat-border)' }} className="border rounded p-2 max-w-full">
                     <option value="expanded">Expandida</option><option value="limited">Altura limitada</option><option value="collapsed">Oculta</option>
                   </select>
                 </label>
@@ -1138,7 +1270,7 @@ export const SettingsModal: React.FC = React.memo(() => {
                     Modo padrão ao inserir código da IA{' '}
                     <span className="font-normal opacity-70">(Shift+Tab alterna na célula)</span>
                   </label>
-                  <div className="grid grid-cols-2 gap-1.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                     {(
                       [
                         { id: 'replace_cell', label: 'Substituir célula' },
@@ -1246,6 +1378,7 @@ export const SettingsModal: React.FC = React.memo(() => {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 });
