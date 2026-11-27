@@ -8,6 +8,8 @@ import queue
 import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -440,6 +442,8 @@ class NotebookKernelSession:
         self.variables_cache: list[dict[str, Any]] = []
         self.active_cell_id: str | None = None
         self.active_execution_count: int | None = None
+        self.active_started_mono: float | None = None
+        self.active_started_at: str | None = None
         self._active_outputs_buf = _OutputAccumulator(
             max_items=_MAX_ACTIVE_SNAPSHOT_OUTPUTS,
             max_stream_chars=_MAX_ACTIVE_SNAPSHOT_STREAM_CHARS,
@@ -452,6 +456,12 @@ class NotebookKernelSession:
     @property
     def active_outputs(self) -> list[dict[str, Any]]:
         return self._active_outputs_buf.snapshot()
+
+    @property
+    def active_elapsed_ms(self) -> int | None:
+        if self.active_started_mono is None:
+            return None
+        return max(0, int((time.monotonic() - self.active_started_mono) * 1000))
 
     async def _emit(
         self, payload: dict[str, Any], direct_cb: EventCallback | None = None
@@ -532,6 +542,8 @@ class NotebookKernelSession:
                         "cell_id": cell_id,
                         "execution_count": None,
                         "variables": self.variables_cache,
+                        "duration_ms": None,
+                        "status": "aborted",
                     },
                     on_event,
                 )
@@ -539,6 +551,8 @@ class NotebookKernelSession:
                     "execution_count": None,
                     "outputs": [],
                     "variables": self.variables_cache,
+                    "duration_ms": None,
+                    "status": "aborted",
                 }
 
             if not self.kc or not await self.km.is_alive():
@@ -551,6 +565,8 @@ class NotebookKernelSession:
                             "cell_id": cell_id,
                             "execution_count": None,
                             "variables": self.variables_cache,
+                            "duration_ms": None,
+                            "status": "aborted",
                         },
                         on_event,
                     )
@@ -558,11 +574,17 @@ class NotebookKernelSession:
                         "execution_count": None,
                         "outputs": [],
                         "variables": self.variables_cache,
+                        "duration_ms": None,
+                        "status": "aborted",
                     }
 
+            start_mono = time.monotonic()
+            started_at_iso = datetime.now(timezone.utc).isoformat()
             self.status = "busy"
             self.active_cell_id = cell_id
             self.active_execution_count = None
+            self.active_started_mono = start_mono
+            self.active_started_at = started_at_iso
             self._active_outputs_buf.clear()
             start_lifecycle_epoch = self._lifecycle_epoch
             lifecycle_aborted = False
@@ -581,10 +603,13 @@ class NotebookKernelSession:
                     "type": "cell_execution_start",
                     "notebook_path": self.notebook_path,
                     "cell_id": cell_id,
+                    "started_at": started_at_iso,
                 },
                 on_event,
             )
 
+            start_mono = time.monotonic()
+            self.active_started_mono = start_mono
             msg_id = self.kc.execute(
                 code,
                 silent=False,
@@ -596,6 +621,8 @@ class NotebookKernelSession:
             execution_count: int | None = None
             outputs_buf = _OutputAccumulator()
             had_error = False
+            duration_ms: int | None = None
+            finished_at_iso: str | None = None
 
             def _record_output(item: dict[str, Any]) -> None:
                 outputs_buf.append(item)
@@ -742,6 +769,9 @@ class NotebookKernelSession:
                     elif mtype == "status" and content.get("execution_state") == "idle":
                         break
 
+                duration_ms = max(0, int((time.monotonic() - start_mono) * 1000))
+                finished_at_iso = datetime.now(timezone.utc).isoformat()
+
                 if not lifecycle_aborted and not kernel_died:
                     try:
                         while True:
@@ -772,8 +802,16 @@ class NotebookKernelSession:
                         await lifecycle_task
                     except (asyncio.CancelledError, Exception):
                         pass
+                if duration_ms is None:
+                    duration_ms = max(0, int((time.monotonic() - start_mono) * 1000))
+                if finished_at_iso is None:
+                    finished_at_iso = datetime.now(timezone.utc).isoformat()
+                exec_status = "aborted" if lifecycle_aborted else ("error" if had_error else "ok")
+                reported_duration_ms = None if lifecycle_aborted else duration_ms
                 self.active_cell_id = None
                 self.active_execution_count = None
+                self.active_started_mono = None
+                self.active_started_at = None
                 self._active_outputs_buf.clear()
                 await self._emit(
                     {
@@ -782,6 +820,10 @@ class NotebookKernelSession:
                         "cell_id": cell_id,
                         "execution_count": execution_count,
                         "variables": self.variables_cache,
+                        "duration_ms": reported_duration_ms,
+                        "status": exec_status,
+                        "started_at": started_at_iso,
+                        "finished_at": finished_at_iso,
                     },
                     on_event,
                 )
@@ -800,6 +842,8 @@ class NotebookKernelSession:
                 "execution_count": execution_count,
                 "outputs": outputs_buf.snapshot(),
                 "variables": self.variables_cache,
+                "duration_ms": reported_duration_ms,
+                "status": exec_status,
             }
 
     async def interrupt(self) -> None:
@@ -819,6 +863,8 @@ class NotebookKernelSession:
                 self._failed_batches.clear()
                 self.active_cell_id = None
                 self.active_execution_count = None
+                self.active_started_mono = None
+                self.active_started_at = None
                 self._active_outputs_buf.clear()
                 if await self.km.is_alive():
                     await self.km.restart_kernel(now=True)
@@ -843,6 +889,8 @@ class NotebookKernelSession:
     async def _shutdown_unlocked(self) -> None:
         self.active_cell_id = None
         self.active_execution_count = None
+        self.active_started_mono = None
+        self.active_started_at = None
         self._active_outputs_buf.clear()
         try:
             if self.kc:
@@ -1485,6 +1533,8 @@ class SaturnoKernelRegistry:
                     "active_cell_id": session.active_cell_id,
                     "active_execution_count": session.active_execution_count,
                     "active_outputs": list(session.active_outputs),
+                    "active_elapsed_ms": session.active_elapsed_ms,
+                    "active_started_at": session.active_started_at,
                 }
             )
         return snapshots

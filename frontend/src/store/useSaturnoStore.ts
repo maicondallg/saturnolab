@@ -16,6 +16,7 @@ import { normalizeThemeId } from '../themes';
 import { bootstrapConfig, persistAppearance } from '../services/bootstrap';
 import { hasUnsavedChanges, initialWorkspaceSession, reconcileRestoredSession, preloadWorkspaceEditors, restoreWorkspaceSession, saveWorkspaceSession } from '../services/workspaceSession';
 import {
+  CellExecutionStatus,
   CellType,
   EditorPane,
   FileEntry,
@@ -535,13 +536,28 @@ function syncDirtyTabsTimers(state: SaturnoStore) {
   }
 }
 
+const CLEAR_EXECUTION_TIMING = {
+  isRunning: false,
+  executionQueued: false,
+  executionStartedAt: null,
+  executionFinishedAt: null,
+  executionDurationMs: null,
+  executionStatus: null,
+} as const;
+
+const STOP_ACTIVE_EXECUTION = {
+  isRunning: false,
+  executionQueued: false,
+  executionStartedAt: null,
+} as const;
+
 function deleteNotebookCell(state: SaturnoStore, tab: OpenNotebookTab, targetId: string, redoIds: string[]) {
   const index = tab.cells.findIndex(cell => cell.id === targetId);
   if (index < 0) return state;
   const cell = tab.cells[index];
   const soleCell = tab.cells.length === 1;
   const cells = soleCell
-    ? [{ ...cell, source: '', outputs: [], execution_count: null, markdownRendered: false }]
+    ? [{ ...cell, source: '', outputs: [], execution_count: null, markdownRendered: false, ...CLEAR_EXECUTION_TIMING }]
     : tab.cells.filter(c => c.id !== targetId);
   return {
     deletedCellStack: [...state.deletedCellStack, { notebookPath: tab.path, cell, index }].slice(-MAX_DELETED_CELL_STACK),
@@ -1246,6 +1262,14 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
             ? {
                 ...c,
                 isRunning: true,
+                executionQueued: false,
+                executionStartedAt:
+                  typeof nb.active_elapsed_ms === 'number'
+                    ? Date.now() - nb.active_elapsed_ms
+                    : Date.now(),
+                executionDurationMs: null,
+                executionStatus: null,
+                executionFinishedAt: null,
                 execution_count:
                   nb.active_execution_count !== undefined && nb.active_execution_count !== null
                     ? nb.active_execution_count
@@ -1435,7 +1459,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
             name: nextTitle,
             kernelStatus: 'stopped',
             variables: [],
-            cells: t.cells.map((c) => ({ ...c, isRunning: false })),
+            cells: t.cells.map((c) => (c.isRunning ? { ...c, ...STOP_ACTIVE_EXECUTION } : c)),
           } as WorkspaceTab;
         }
         return {
@@ -1612,7 +1636,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
                 ? {
                     kernelStatus: 'stopped',
                     variables: [],
-                    cells: t.cells.map((c) => ({ ...c, isRunning: false })),
+                    cells: t.cells.map((c) => (c.isRunning ? { ...c, ...STOP_ACTIVE_EXECUTION } : c)),
                   }
                 : {}),
             } as WorkspaceTab)
@@ -2244,6 +2268,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
                         cell_type: cellType,
                         outputs: cellType === 'markdown' ? [] : c.outputs,
                         execution_count: cellType === 'markdown' ? null : c.execution_count,
+                        ...(cellType === 'markdown' ? CLEAR_EXECUTION_TIMING : {}),
                         markdownRendered: false,
                       }
                     : c
@@ -2359,7 +2384,10 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
     const existing = nextCells.findIndex(c => c.id === restored.cell.id);
     const blank = nextCells[existing];
     const reuseBlank = blank && !blank.source && !blank.outputs.length && blank.execution_count == null;
-    const restoredCell = existing < 0 || reuseBlank ? restored.cell : { ...restored.cell, id: makeId() };
+    const baseRestored = restored.cell.isRunning
+      ? { ...restored.cell, ...STOP_ACTIVE_EXECUTION }
+      : restored.cell;
+    const restoredCell = existing < 0 || reuseBlank ? baseRestored : { ...baseRestored, id: makeId() };
     if (reuseBlank) nextCells[existing] = restoredCell;
     else nextCells.splice(insertAt, 0, restoredCell);
 
@@ -2432,6 +2460,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       ...clip,
       id: newId,
       execution_count: null,
+      ...CLEAR_EXECUTION_TIMING,
     };
     const idx = tab.cells.findIndex((c) => c.id === refId);
     const nextCells = [...tab.cells];
@@ -2462,7 +2491,9 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
                 ...t,
                 dirty: true,
                 cells: t.cells.map((c) =>
-                  c.id === cellId ? { ...c, outputs: [], execution_count: null } : c
+                  c.id === cellId
+                    ? { ...c, outputs: [], execution_count: null, ...CLEAR_EXECUTION_TIMING }
+                    : c
                 ),
               }
             : t
@@ -2478,7 +2509,12 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
           ? {
               ...t,
               dirty: true,
-              cells: t.cells.map((c) => ({ ...c, outputs: [], execution_count: null })),
+              cells: t.cells.map((c) => ({
+                ...c,
+                outputs: [],
+                execution_count: null,
+                ...CLEAR_EXECUTION_TIMING,
+              })),
             }
           : t
       ),
@@ -2499,6 +2535,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       get().setMarkdownRendered(cell.id, true);
     } else {
       const clearingOutputs = cell.outputs.length > 0;
+      const anotherCellRunning = tab.cells.some((c) => c.isRunning && c.id !== cell.id);
       set((s) => ({
         tabs: s.tabs.map((t) =>
           t.id === tab.id && t.kind === 'notebook'
@@ -2508,7 +2545,17 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
                 kernelStatus: 'busy',
                 cells: t.cells.map((c) =>
                   c.id === cell.id
-                    ? { ...c, outputs: [], isRunning: true, outputCollapsed: get().config?.output_display === 'collapsed' }
+                    ? {
+                        ...c,
+                        outputs: [],
+                        isRunning: true,
+                        executionQueued: anotherCellRunning,
+                        executionStartedAt: null,
+                        executionDurationMs: null,
+                        executionStatus: null,
+                        executionFinishedAt: null,
+                        outputCollapsed: get().config?.output_display === 'collapsed',
+                      }
                     : c
                 ),
               }
@@ -2556,6 +2603,8 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
       (c) => c.cell_type === 'code' && Boolean(c.source.trim())
     );
     const runIds = new Set(codeCellsToRun.map((c) => c.id));
+    const firstRunId = codeCellsToRun[0]?.id;
+    const alreadyBusy = tab.cells.some((c) => c.isRunning);
     const batchId = `batch_${makeId()}`;
 
     const clearingAnyOutputs = codeCellsToRun.some((c) => c.outputs.length > 0);
@@ -2575,6 +2624,11 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
                     ...c,
                     outputs: [],
                     isRunning: true,
+                    executionQueued: alreadyBusy || c.id !== firstRunId,
+                    executionStartedAt: null,
+                    executionDurationMs: null,
+                    executionStatus: null,
+                    executionFinishedAt: null,
                     outputCollapsed: collapseDefault,
                   };
                 }
@@ -2627,7 +2681,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
               ...t,
               kernelStatus: 'starting',
               variables: [],
-              cells: t.cells.map((c) => ({ ...c, isRunning: false })),
+              cells: t.cells.map((c) => (c.isRunning ? { ...c, ...STOP_ACTIVE_EXECUTION } : c)),
             }
           : t
       ),
@@ -3041,7 +3095,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
               ...t,
               kernelStatus: 'stopped',
               variables: [],
-              cells: t.cells.map((c) => (c.isRunning ? { ...c, isRunning: false } : c)),
+              cells: t.cells.map((c) => (c.isRunning ? { ...c, ...STOP_ACTIVE_EXECUTION } : c)),
             };
           }
           const activeCellId = kInfo.active_cell_id || null;
@@ -3051,9 +3105,18 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
             variables: kInfo.variables || t.variables,
             cells: t.cells.map((c) => {
               if (activeCellId && c.id === activeCellId) {
+                const syncedStart =
+                  typeof kInfo.active_elapsed_ms === 'number'
+                    ? Date.now() - kInfo.active_elapsed_ms
+                    : c.executionStartedAt ?? Date.now();
                 return {
                   ...c,
                   isRunning: true,
+                  executionQueued: false,
+                  executionStartedAt: syncedStart,
+                  executionDurationMs: null,
+                  executionStatus: null,
+                  executionFinishedAt: null,
                   execution_count:
                     kInfo.active_execution_count !== undefined && kInfo.active_execution_count !== null
                       ? kInfo.active_execution_count
@@ -3062,7 +3125,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
                 };
               }
               if (kInfo.status !== 'busy' && c.isRunning) {
-                return { ...c, isRunning: false };
+                return { ...c, ...STOP_ACTIVE_EXECUTION };
               }
               return c;
             }),
@@ -3083,6 +3146,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         ),
       }));
     } else if (type === 'cell_execution_start') {
+      const startedAt = Date.now();
       set((s) => ({
         tabs: s.tabs.map((t) => {
           if (t.kind !== 'notebook' || t.path !== msg.notebook_path) return t;
@@ -3091,7 +3155,18 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
             ...t,
             dirty: hadOutputs ? true : t.dirty,
             cells: t.cells.map((c) =>
-              c.id === msg.cell_id ? { ...c, isRunning: true, outputs: [] } : c
+              c.id === msg.cell_id
+                ? {
+                    ...c,
+                    isRunning: true,
+                    executionQueued: false,
+                    executionStartedAt: startedAt,
+                    executionDurationMs: null,
+                    executionStatus: null,
+                    executionFinishedAt: null,
+                    outputs: [],
+                  }
+                : c
             ),
           };
         }),
@@ -3128,6 +3203,7 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
         }),
       }));
     } else if (type === 'cell_execution_done') {
+      const doneAt = Date.now();
       set((s) => {
         let allowAutoScroll = false;
         const nextTabs = s.tabs.map((t) => {
@@ -3145,18 +3221,40 @@ export const useSaturnoStore = create<SaturnoStore>((set, get) => ({
             ...t,
             dirty: countChanged ? true : t.dirty,
             variables: msg.variables || t.variables,
-            cells: t.cells.map((c) =>
-              c.id === msg.cell_id
-                ? {
-                    ...c,
-                    isRunning: false,
-                    execution_count:
-                      msg.execution_count !== undefined && msg.execution_count !== null
-                        ? msg.execution_count
-                        : c.execution_count,
-                  }
-                : c
-            ),
+            cells: t.cells.map((c) => {
+              if (c.id !== msg.cell_id) return c;
+              const aborted = msg.status === 'aborted';
+              const durationMs = aborted
+                ? null
+                : typeof msg.duration_ms === 'number'
+                  ? msg.duration_ms
+                  : c.executionStartedAt != null
+                    ? Math.max(0, doneAt - c.executionStartedAt)
+                    : null;
+              const execStatus: CellExecutionStatus | null = aborted
+                ? null
+                : msg.status === 'error'
+                  ? 'error'
+                  : durationMs !== null
+                    ? 'ok'
+                    : null;
+              return {
+                ...c,
+                isRunning: false,
+                executionQueued: false,
+                executionStartedAt: null,
+                executionDurationMs: durationMs,
+                executionStatus: execStatus,
+                executionFinishedAt:
+                  !aborted && durationMs !== null
+                    ? msg.finished_at || new Date(doneAt).toISOString()
+                    : null,
+                execution_count:
+                  msg.execution_count !== undefined && msg.execution_count !== null
+                    ? msg.execution_count
+                    : c.execution_count,
+              };
+            }),
           };
         });
         return {

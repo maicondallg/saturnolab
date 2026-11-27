@@ -23,6 +23,7 @@ import { CodeMirrorCellEditor } from './CodeMirrorCellEditor';
 import { InlineAIPopover } from './InlineAIPopover';
 import { notebookOutline } from '../utils/notebookOutline';
 import { CellOutputView } from './CellOutputView';
+import { CellExecutionTimer } from './CellExecutionTimer';
 
 interface Props {
   cell: NotebookCellData;
@@ -192,7 +193,7 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive, previ
             selectCell(cell.id, 'command');
           }}
           title="Selecionar célula (Command Mode)"
-          className="w-11 shrink-0 pt-1 flex flex-col items-end pr-0.5 select-none cursor-pointer"
+          className="w-[54px] shrink-0 pt-1 flex flex-col items-end pr-0.5 select-none cursor-pointer"
         >
           {heading && (
             <button
@@ -211,35 +212,60 @@ export const NotebookCell: React.FC<Props> = React.memo(({ cell, isActive, previ
             </button>
           )}
           {cell.cell_type === 'code' && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                runCell(cell.id, 'none');
-              }}
-              title="Executar célula (Shift+Enter)"
-              className="group/play h-6 px-1 rounded-[3px] flex items-center justify-center hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] cursor-pointer"
-              style={{
-                color: isActive ? 'var(--sat-text-secondary)' : 'var(--sat-text-muted)',
-              }}
-            >
-              {cell.isRunning ? (
-                <Loader2
-                  size={14}
-                  className="animate-spin"
-                  style={{ color: 'var(--sat-accent)' }}
-                />
-              ) : (
-                <>
-                  <span className="group-hover/play:hidden font-mono text-xs">
-                    {cell.execution_count !== null && cell.execution_count !== undefined
-                      ? `[${cell.execution_count}]:`
-                      : '[ ]:'}
-                  </span>
-                  <Play size={13} className="hidden group-hover/play:block fill-current" />
-                </>
-              )}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  runCell(cell.id, 'none');
+                }}
+                title={
+                  cell.isRunning
+                    ? cell.executionQueued
+                      ? 'Aguardando execução na fila'
+                      : 'Executando célula…'
+                    : 'Executar célula (Shift+Enter)'
+                }
+                className="group/play h-[22px] px-1 rounded-[3px] flex items-center justify-center hover:bg-[var(--sat-bg-hover)] hover:text-[var(--sat-text-primary)] cursor-pointer"
+                style={{
+                  color: isActive ? 'var(--sat-text-secondary)' : 'var(--sat-text-muted)',
+                }}
+              >
+                {cell.isRunning ? (
+                  cell.executionQueued ? (
+                    <span
+                      className="font-mono text-xs"
+                      style={{ color: 'var(--sat-text-muted)', opacity: 0.75 }}
+                    >
+                      [*]:
+                    </span>
+                  ) : (
+                    <Loader2
+                      size={14}
+                      className="animate-spin"
+                      style={{ color: 'var(--sat-accent)' }}
+                    />
+                  )
+                ) : (
+                  <>
+                    <span className="group-hover/play:hidden font-mono text-xs">
+                      {cell.execution_count !== null && cell.execution_count !== undefined
+                        ? `[${cell.execution_count}]:`
+                        : '[ ]:'}
+                    </span>
+                    <Play size={13} className="hidden group-hover/play:block fill-current" />
+                  </>
+                )}
+              </button>
+              <CellExecutionTimer
+                isRunning={cell.isRunning}
+                executionQueued={cell.executionQueued}
+                executionStartedAt={cell.executionStartedAt}
+                executionDurationMs={cell.executionDurationMs}
+                executionStatus={cell.executionStatus}
+                executionFinishedAt={cell.executionFinishedAt}
+              />
+            </>
           )}
         </div>
 

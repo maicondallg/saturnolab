@@ -549,7 +549,7 @@ export const NotebookView: React.FC<Props> = React.memo(({ tab, isActivePane = t
           ))}
 
           {/* Bottom Add Buttons */}
-          <div className="pl-14 pt-3 flex items-center gap-2 opacity-55 hover:opacity-100 transition-opacity">
+          <div className="pl-[70px] pt-3 flex items-center gap-2 opacity-55 hover:opacity-100 transition-opacity">
             <button
               onClick={() => {
                 const lastId = tab.cells[tab.cells.length - 1]?.id;

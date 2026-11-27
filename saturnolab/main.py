@@ -290,6 +290,8 @@ async def api_read_notebook(path: str = Query(...)) -> dict[str, Any]:
             nb["active_cell_id"] = existing.active_cell_id
             nb["active_execution_count"] = existing.active_execution_count
             nb["active_outputs"] = list(existing.active_outputs)
+            nb["active_elapsed_ms"] = existing.active_elapsed_ms
+            nb["active_started_at"] = existing.active_started_at
         return nb
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -609,6 +611,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 "cell_id": cell_id,
                 "execution_count": None,
                 "variables": [],
+                "duration_ms": None,
+                "status": "error",
             }
             await safe_send(err_payload)
             await kernel_registry.broadcast(err_payload, exclude=safe_send)

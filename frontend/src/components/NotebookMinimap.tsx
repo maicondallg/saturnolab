@@ -21,6 +21,7 @@ import {
   tokenColorAndAlpha,
   tokenizeMinimapLine,
 } from '../utils/minimapUtils';
+import { formatCellDuration } from '../utils/executionTime';
 
 interface Props {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -1168,13 +1169,35 @@ export const NotebookMinimap: React.FC<Props> = React.memo(
                       ? `In [${hoverCard.preview.executionCount}]`
                       : 'Code'}
                 </span>
-                {hoverCard.preview.isRunning && (
-                  <Loader2
-                    size={11}
-                    className="animate-spin shrink-0"
-                    style={{ color: 'var(--sat-accent)' }}
-                  />
-                )}
+                {hoverCard.preview.isRunning &&
+                  (hoverCard.preview.executionQueued ? (
+                    <span
+                      className="text-[10px] font-mono shrink-0"
+                      style={{ color: 'var(--sat-text-muted)' }}
+                    >
+                      fila
+                    </span>
+                  ) : (
+                    <Loader2
+                      size={11}
+                      className="animate-spin shrink-0"
+                      style={{ color: 'var(--sat-accent)' }}
+                    />
+                  ))}
+                {!hoverCard.preview.isRunning &&
+                  typeof hoverCard.preview.executionDurationMs === 'number' && (
+                    <span
+                      className="text-[10px] font-mono shrink-0"
+                      style={{
+                        color:
+                          hoverCard.preview.executionStatus === 'error'
+                            ? 'var(--sat-error-text)'
+                            : 'var(--sat-text-muted)',
+                      }}
+                    >
+                      {formatCellDuration(hoverCard.preview.executionDurationMs)}
+                    </span>
+                  )}
                 {hoverCard.preview.sectionCollapsed && (
                   <span
                     className="inline-flex items-center text-[10px]"

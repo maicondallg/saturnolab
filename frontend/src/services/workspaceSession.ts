@@ -162,6 +162,14 @@ export async function restoreWorkspaceSession(root: string, collapseOutputs: boo
                   ? {
                       ...c,
                       isRunning: true,
+                      executionQueued: false,
+                      executionStartedAt:
+                        typeof notebook.active_elapsed_ms === 'number'
+                          ? Date.now() - notebook.active_elapsed_ms
+                          : Date.now(),
+                      executionDurationMs: null,
+                      executionStatus: null,
+                      executionFinishedAt: null,
                       execution_count:
                         notebook.active_execution_count !== undefined &&
                         notebook.active_execution_count !== null

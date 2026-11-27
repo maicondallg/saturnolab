@@ -594,6 +594,9 @@ export interface CellHoverPreview {
   cellType: 'code' | 'markdown';
   executionCount: number | null;
   isRunning: boolean;
+  executionQueued: boolean;
+  executionDurationMs?: number | null;
+  executionStatus?: 'ok' | 'error' | 'aborted' | null;
   heading?: string;
   lines: string[];
   outputSummary: CellOutputSummary;
@@ -631,6 +634,9 @@ export function extractCellPreview(
     cellType: cell.cell_type,
     executionCount: cell.execution_count,
     isRunning: Boolean(cell.isRunning),
+    executionQueued: Boolean(cell.executionQueued),
+    executionDurationMs: cell.executionDurationMs,
+    executionStatus: cell.executionStatus,
     heading,
     lines: previewLines,
     outputSummary: classifyCellOutputs(cell.outputs),

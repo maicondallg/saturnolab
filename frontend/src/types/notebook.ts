@@ -1,4 +1,5 @@
 export type CellType = 'code' | 'markdown';
+export type CellExecutionStatus = 'ok' | 'error' | 'aborted';
 
 export interface CellOutput {
   output_type: 'stream' | 'display_data' | 'execute_result' | 'error';
@@ -19,6 +20,11 @@ export interface NotebookCellData {
   outputs: CellOutput[];
   metadata?: Record<string, any>;
   isRunning?: boolean;
+  executionQueued?: boolean;
+  executionStartedAt?: number | null;
+  executionFinishedAt?: string | null;
+  executionDurationMs?: number | null;
+  executionStatus?: CellExecutionStatus | null;
   markdownRendered?: boolean;
   outputCollapsed?: boolean;
   sectionCollapsed?: boolean;

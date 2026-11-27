@@ -66,6 +66,8 @@ export const api = {
       active_cell_id?: string | null;
       active_execution_count?: number | null;
       active_outputs?: CellOutput[];
+      active_elapsed_ms?: number | null;
+      active_started_at?: string | null;
     }>(`/api/fs/notebook?path=${encodeURIComponent(path)}`),
   saveNotebook: (path: string, cells: any[], metadata?: Record<string, any>) =>
     apiFetch<{ saved: boolean; path: string; modified: string }>('/api/fs/notebook/save', {
